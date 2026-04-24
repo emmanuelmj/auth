@@ -28,14 +28,16 @@ func (a *Auth) createUsers(ctx context.Context) error {
     query := `
         CREATE TABLE IF NOT EXISTS users (
             user_id TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
-            salt TEXT NOT NULL
+            password_hash TEXT,
+            salt TEXT,
+            auth_provider TEXT NOT NULL DEFAULT 'local',
+            google_id TEXT UNIQUE
         )`
     _, err := a.Conn.Exec(ctx, query)
     ...
 }
 ```
-The users table stores each user’s unique ID, the Argon2 hash of their password, and the salt that was used to compute that hash.
+The users table stores each user’s unique ID. For local users, password_hash and salt are used for Argon2 authentication. For Google OAuth users, auth_provider/google_id are used and password fields may be null.
 ```go
 func (a *Auth) createRoles(ctx context.Context) error {
     query := `
@@ -103,7 +105,7 @@ func (a *Auth) checkUsers(ctx context.Context) error {
     ...
 }
 ```
-checkUsers checks the users table,making sure that the user_id, password_hash, and salt are present and all of type text. If someone has modified the schema manually this check will fail and force you to resolve the mismatch.
+checkUsers checks the users table,making sure that user_id, password_hash, salt, auth_provider, and google_id are present with expected types, and that auth_provider defaults to 'local' while password_hash remains nullable for OAuth users.
 
 ```go
 func (a *Auth) checkRoles(ctx context.Context) error {

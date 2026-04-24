@@ -25,13 +25,15 @@ has no single way to reject something that is being inserted in the database, ba
 
 The second row however, stores password which is hashed by argon2. We choose argon2 because it is tried and tested and has the best outcome so far.
 
-And we store no other info, because it just slows things down.
+For OAuth users, password-based fields are nullable and the provider identity can be stored.
 
 ```
 CREATE TABLE users (
         user_id TEXT PRIMARY KEY,
-        password_hash TEXT NOT NULL,
-        salt TEXT NOT NULL
+        password_hash TEXT,
+        salt TEXT,
+        auth_provider TEXT NOT NULL DEFAULT 'local',
+        google_id TEXT UNIQUE
 );
 ```
 

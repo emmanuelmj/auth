@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,8 +32,10 @@ func (a *Auth) createUsers(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS users (
 	user_id TEXT PRIMARY KEY,
-	password_hash TEXT NOT NULL,
-	 salt TEXT NOT NULL
+	password_hash TEXT,
+	 salt TEXT,
+	auth_provider TEXT NOT NULL DEFAULT 'local',
+	google_id TEXT UNIQUE
 	)`
 	_, err := a.Conn.Exec(ctx, query)
 	if err != nil {
@@ -134,7 +137,7 @@ func (a *Auth) checkSpaces(ctx context.Context) error {
 
 func (a *Auth) checkUsers(ctx context.Context) error {
 	query := `
-	SELECT column_name, data_type
+	SELECT column_name, data_type, is_nullable, column_default
 	FROM information_schema.columns
 	WHERE table_name = 'users'
 	ORDER BY ordinal_position;
@@ -145,28 +148,69 @@ func (a *Auth) checkUsers(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	columns := map[string]string{}
+	type columnInfo struct {
+		dataType      string
+		isNullable    string
+		columnDefault string
+	}
+	columns := map[string]columnInfo{}
 	for rows.Next() {
-		var name, dataType string
-		if err := rows.Scan(&name, &dataType); err != nil {
+		var name, dataType, isNullable string
+		var columnDefault *string
+		if err := rows.Scan(&name, &dataType, &isNullable, &columnDefault); err != nil {
 			return fmt.Errorf("failed to scan users schema: %w", err)
 		}
-		columns[name] = dataType
+		colDefault := ""
+		if columnDefault != nil {
+			colDefault = *columnDefault
+		}
+		columns[name] = columnInfo{
+			dataType:      dataType,
+			isNullable:    isNullable,
+			columnDefault: colDefault,
+		}
 	}
 
 	expected := map[string]string{
 		"user_id":       "text",
 		"password_hash": "text",
 		"salt":          "text",
+		"auth_provider": "text",
+		"google_id":     "text",
 	}
 
 	for col, typ := range expected {
-		if t, ok := columns[col]; !ok || t != typ {
-			return fmt.Errorf("users table schema mismatch for column '%s': expected %s, got %s", col, typ, t)
+		if c, ok := columns[col]; !ok || c.dataType != typ {
+			return fmt.Errorf("users table schema mismatch for column '%s': expected %s, got %s", col, typ, c.dataType)
 		}
 	}
 
+	if columns["password_hash"].isNullable != "YES" {
+		return fmt.Errorf("users table schema mismatch for column 'password_hash': expected nullable column for oauth users")
+	}
+	if !strings.Contains(columns["auth_provider"].columnDefault, "'local'") {
+		return fmt.Errorf("users table schema mismatch for column 'auth_provider': expected default 'local', got %s", columns["auth_provider"].columnDefault)
+	}
+
 	log.Println("Users table schema is correct.")
+	return nil
+}
+
+func (a *Auth) migrateUsersOAuthSchema(ctx context.Context) error {
+	migrationQueries := []string{
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_provider TEXT NOT NULL DEFAULT 'local'",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id TEXT",
+		"ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL",
+		"ALTER TABLE users ALTER COLUMN salt DROP NOT NULL",
+		"CREATE UNIQUE INDEX IF NOT EXISTS users_google_id_unique_idx ON users (google_id) WHERE google_id IS NOT NULL",
+	}
+
+	for _, query := range migrationQueries {
+		if _, err := a.Conn.Exec(ctx, query); err != nil {
+			return fmt.Errorf("failed oauth schema migration for users table: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -337,6 +381,9 @@ func (a *Auth) checkTables(ctx context.Context) error {
 		return err
 	} else {
 		if check {
+			if err = a.migrateUsersOAuthSchema(ctx); err != nil {
+				return err
+			}
 			if err = a.checkUsers(ctx); err != nil {
 				return err
 			}

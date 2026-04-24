@@ -3,9 +3,13 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/mail"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func generateSalt(size int) (string, error) {
@@ -22,14 +26,20 @@ func (a *Auth) LoginUser(username, password string) error {
 		return ErrDatabaseUnavailable
 	}
 
-	var storedHash, storedSalt string
+	var storedHash, storedSalt sql.NullString
 	query := "SELECT password_hash, salt FROM users WHERE user_id = $1"
 	err := a.Conn.QueryRow(context.Background(), query, username).Scan(&storedHash, &storedSalt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
 		return ErrUserNotFound
 	}
+	if !storedHash.Valid || !storedSalt.Valid {
+		return ErrInvalidCredentials
+	}
 
-	if !a.comparePasswords(password, storedSalt, storedHash) {
+	if !a.comparePasswords(password, storedSalt.String, storedHash.String) {
 		return ErrInvalidCredentials
 	}
 
@@ -48,6 +58,85 @@ func (a *Auth) LoginJWT(tokenString string) (*JWTClaims, error) {
 		JWT logic in jwt.go.
 	*/
 	return a.ValidateToken(tokenString)
+}
+
+func (a *Auth) LoginWithGoogle(ctx context.Context, gUser *GoogleUser) (string, error) {
+	if a.Conn == nil {
+		return "", ErrDatabaseUnavailable
+	}
+	if ctx == nil {
+		return "", fmt.Errorf("%w: context is required", ErrInvalidInput)
+	}
+	if gUser == nil {
+		return "", ErrInvalidInput
+	}
+	if gUser.ID == "" || gUser.Email == "" {
+		return "", ErrEmptyInput
+	}
+	if _, err := mail.ParseAddress(gUser.Email); err != nil {
+		return "", ErrInvalidEmail
+	}
+
+	tx, err := a.Conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return "", fmt.Errorf("%w: could not start google login transaction: %v", ErrDatabaseUnavailable, err)
+	}
+	defer tx.Rollback(ctx)
+
+	var authProvider sql.NullString
+	var googleID sql.NullString
+	err = tx.QueryRow(
+		ctx,
+		"SELECT auth_provider, google_id FROM users WHERE user_id = $1",
+		gUser.Email,
+	).Scan(&authProvider, &googleID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			_, err = tx.Exec(
+				ctx,
+				"INSERT INTO users (user_id, password_hash, salt, auth_provider, google_id) VALUES ($1, NULL, NULL, 'google', $2)",
+				gUser.Email,
+				gUser.ID,
+			)
+			if err != nil {
+				return "", fmt.Errorf("%w: failed to create google user: %v", ErrDatabaseUnavailable, err)
+			}
+		} else {
+			return "", fmt.Errorf("%w: failed to query existing user: %v", ErrDatabaseUnavailable, err)
+		}
+	} else {
+		if googleID.Valid && googleID.String != "" && googleID.String != gUser.ID {
+			return "", fmt.Errorf("%w: google account mismatch for user", ErrInvalidCredentials)
+		}
+		if !googleID.Valid || googleID.String == "" {
+			_, err = tx.Exec(
+				ctx,
+				"UPDATE users SET google_id = $1, auth_provider = CASE WHEN auth_provider = 'local' THEN auth_provider ELSE 'google' END WHERE user_id = $2",
+				gUser.ID,
+				gUser.Email,
+			)
+			if err != nil {
+				return "", fmt.Errorf("%w: failed to link google account: %v", ErrDatabaseUnavailable, err)
+			}
+		}
+		if authProvider.Valid && authProvider.String == "" {
+			_, err = tx.Exec(ctx, "UPDATE users SET auth_provider = 'google' WHERE user_id = $1", gUser.Email)
+			if err != nil {
+				return "", fmt.Errorf("%w: failed to update auth provider: %v", ErrDatabaseUnavailable, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("%w: failed to finalize google login: %v", ErrDatabaseUnavailable, err)
+	}
+
+	token, err := a.GenerateToken(gUser.Email)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
 func (a *Auth) RegisterUser(username, password string) error {
