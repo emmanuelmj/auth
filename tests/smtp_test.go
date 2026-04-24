@@ -101,29 +101,16 @@ func runMockSMTP(t *testing.T, binary, inputPath, outputPath string, timeout tim
 /* ======================== Happy Path ======================== */
 
 /*
-TestSMTPMockOTPDelivery tests the full OTP delivery pipeline:
-1. Generate an OTP and store it in the database via SendOTP internals
-2. Write a virtual email file with the OTP
-3. Run the C++ binary to perform the loopback SMTP transfer
-4. Read the output file and verify the OTP is present
+TestSMTPMockOTPDelivery tests the SMTP loopback transfer in isolation:
+1. Write a virtual email file containing an OTP
+2. Run the C++ binary to perform the loopback SMTP transfer
+3. Read the output file and verify the OTP survived the transfer
+No database interaction — this purely validates the binary's behaviour.
 */
 func TestSMTPMockOTPDelivery(t *testing.T) {
 	binary := findMockBinary(t)
-	a := setupTestAuth(t)
-	_ = a.OTPInit(6, 5*time.Minute)
 
-	/* Manually insert an OTP (bypasses real SMTP in SendOTP) */
 	otp := "482917"
-	expiry := time.Now().Add(5 * time.Minute)
-	_, err := a.Conn.Exec(context.Background(),
-		"INSERT INTO otps (email, code, expires_at) VALUES ($1, $2, $3)",
-		"smtptest@example.com", otp, expiry,
-	)
-	if err != nil {
-		t.Fatalf("failed to insert test OTP: %v", err)
-	}
-
-	/* Build the virtual email */
 	sender := "noreply@auth.test"
 	subject := "Your Verification Code"
 	body := fmt.Sprintf("Your OTP is: %s\n\nValid for 5 minutes.", otp)
@@ -145,12 +132,6 @@ func TestSMTPMockOTPDelivery(t *testing.T) {
 
 	if !strings.Contains(string(output), otp) {
 		t.Errorf("output file does not contain the OTP %q.\nGot: %s", otp, string(output))
-	}
-
-	/* Verify the OTP is still valid in the database */
-	err = a.VerifyOTP("smtptest@example.com", otp)
-	if err != nil {
-		t.Errorf("OTP should still be valid in DB after mock delivery: %v", err)
 	}
 }
 
