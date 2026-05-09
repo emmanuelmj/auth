@@ -1,10 +1,22 @@
-/bin
-/test
-
-# Compiled binaries and test artifacts
+# ── Go ────────────────────────────────────────────────────────────────────────
+/bin/
+/vendor/
 *.exe
-*.test.exe
-test_out*.txt
+*.dll
+*.so
+*.dylib
+*.test
+coverage.out
+coverage.html
+cpu.prof
+mem.prof
 
-# Helper / one-off scripts (never belong in the repo)
-*.py
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
