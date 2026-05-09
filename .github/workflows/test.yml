@@ -85,14 +85,33 @@ jobs:
           $(brew --prefix postgresql@14)/bin/psql -U postgres -c "CREATE DATABASE testauth OWNER testuser;"
           $(brew --prefix postgresql@14)/bin/psql -U postgres -c "ALTER USER testuser CREATEDB;"
 
-      - name: Setup Redis
+      - name: Setup PostgreSQL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install postgresql15 --params '/Password:postgres' -y --no-progress
+          $env:Path += ";C:\Program Files\PostgreSQL\15\bin"
+          Start-Sleep -Seconds 5
+          psql -U postgres -c "CREATE USER testuser WITH PASSWORD 'testpass';"
+          psql -U postgres -c "CREATE DATABASE testauth OWNER testuser;"
+          psql -U postgres -c "ALTER USER testuser CREATEDB;"
+
+      - name: Setup Redis (Linux / macOS)
         if: runner.os != 'Windows'
         uses: shogo82148/actions-setup-redis@v1
         with:
           redis-version: '7'
 
-      - name: Run Integration Tests
-        # /* Needswork */ - currently skipping on windows runner due to redis setup issues
+      - name: Setup Redis (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip -OutFile redis.zip
+          Expand-Archive redis.zip -DestinationPath C:\Redis
+          Start-Process -FilePath "C:\Redis\redis-server.exe" -NoNewWindow
+          Start-Sleep -Seconds 2
+
+      - name: Run Integration Tests (Linux / macOS)
         if: runner.os != 'Windows'
         env:
           TEST_DB_USER: testuser
@@ -101,3 +120,17 @@ jobs:
           TEST_DB_HOST: 127.0.0.1
           TEST_DB_PORT: 5432
         run: go test -v -race ./...
+
+      - name: Run Integration Tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TEST_DB_USER: testuser
+          TEST_DB_PASS: testpass
+          TEST_DB_NAME: testauth
+          TEST_DB_HOST: 127.0.0.1
+          TEST_DB_PORT: 5432
+          PGPASSWORD: testpass
+        # /* Needswork */ - Windows runner drops -race: the Go race detector requires
+        # CGO which is unreliable on the windows-latest GitHub runner. Speed is also
+        # significantly worse with -race enabled on Windows.
+        run: go test -v ./...
