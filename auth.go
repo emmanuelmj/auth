@@ -169,8 +169,8 @@ func WithOAuth(clientID, clientSecret, redirectURL string) Option {
 				"https://www.googleapis.com/auth/userinfo.email",
 				"https://www.googleapis.com/auth/userinfo.profile",
 			},
-			// Endpoint is intentionally omitted here due to imports, it will be added in OAuth method if needed. Wait, we can import golang.org/x/oauth2/google.
-			// Let's import it.
+			/* Hardcode Google OAuth endpoints directly to avoid pulling in the
+			   golang.org/x/oauth2/google sub-package as a mandatory dependency. */
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  "https://accounts.google.com/o/oauth2/auth",
 				TokenURL: "https://oauth2.googleapis.com/token",
@@ -205,11 +205,17 @@ func WithPasswordPolicy(policy PasswordPolicy) Option {
 	}
 }
 
-/* New initializes a new Auth instance with the given options. */
-/* If WithStorage is not provided, it requires Postgres connection details to fallback on. */
-/* Wait, the requirement: "If WithStorage is not provided, default to the PostgresStorage implementation." */
-/* But to create PostgresStorage, we need db details. Since we changed the signature to New(ctx, opts...), maybe we provide a WithPostgres() option or read from env. */
-/* Let's just create a New(ctx, opts...) and see. */
+/*
+New initializes an Auth instance and applies the provided Option functions in
+order. If any option returns an error the constructor cancels its internal
+context and propagates the error to the caller.
+
+WithStorage must be provided to enable any database-backed operation
+(login, OTP, refresh tokens). The constructor calls CheckTables to ensure the
+required schema exists before returning. If WithOTP is provided alongside
+WithStorage, a background goroutine is started to periodically purge expired
+OTP rows.
+*/
 func New(ctx context.Context, opts ...Option) (*Auth, error) {
 	ctx, cancel := context.WithCancel(ctx)
 

@@ -44,7 +44,7 @@ func (a *Auth) GenerateRefreshToken(ctx context.Context, userID string) (string,
 		return "", ErrDatabaseUnavailable
 	}
 	if a.refreshTokenExpiry <= 0 {
-		return "", fmt.Errorf("%w: refresh tokens not configured, call RefreshTokenInit first", ErrNotInitialized)
+		return "", fmt.Errorf("%w: refresh token expiry not configured, use WithRefreshToken()", ErrNotInitialized)
 	}
 
 	/* Generate a cryptographically secure random token */
