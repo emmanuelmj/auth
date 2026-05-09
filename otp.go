@@ -2,7 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"net/mail"
@@ -46,6 +50,17 @@ func (a *Auth) generateOTP() (string, error) {
 }
 
 /*
+computeOTPHash returns the HMAC-SHA256 of code keyed with the Auth pepper.
+If no pepper is configured the library still provides non-plaintext storage;
+operators are strongly encouraged to configure WithPepper.
+*/
+func (a *Auth) computeOTPHash(code string) string {
+	mac := hmac.New(sha256.New, a.pepper)
+	mac.Write([]byte(code))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+/*
 SendOTP generates an OTP, saves it to the DB (upsert), and emails it.
 Usage: auth.SendOTP("user@example.com")
 */
@@ -71,9 +86,12 @@ func (a *Auth) SendOTP(ctx context.Context, userEmail string) error {
 		return fmt.Errorf("%w: duration %v", ErrInvalidInput, a.otpExpiry)
 	}
 	expiry := time.Now().Add(a.otpExpiry)
-	
-	/* 3. Upsert into DB */
-	if err := a.storage.InsertOTP(ctx, userEmail, code, expiry); err != nil {
+
+	/* 3. Hash the OTP before storage — plaintext codes must never reach the database. */
+	hashedCode := a.computeOTPHash(code)
+
+	/* 4. Upsert into DB */
+	if err := a.storage.InsertOTP(ctx, userEmail, hashedCode, expiry); err != nil {
 		return fmt.Errorf("db error saving OTP: %w", err)
 	}
 
@@ -107,13 +125,14 @@ func (a *Auth) VerifyOTP(ctx context.Context, userEmail, inputCode string) error
 	}
 
 	/* Get the OTP */
-	storedCode, expiry, err := a.storage.GetOTP(ctx, userEmail)
+	storedHash, expiry, err := a.storage.GetOTP(ctx, userEmail)
 	if err != nil {
 		return ErrInvalidOTP /* OTP not found */
 	}
 
-	/* Check match and expiry */
-	if storedCode != inputCode {
+	/* Hash the caller-supplied code and compare in constant time to prevent timing oracles. */
+	inputHash := a.computeOTPHash(inputCode)
+	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(inputHash)) != 1 {
 		return ErrInvalidOTP
 	}
 	if time.Now().After(expiry) {
