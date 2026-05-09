@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -23,7 +24,7 @@ It should be called immediately after auth.Init(). If no expiry is provided (or 
 the library uses the default 24-hour duration.
 Losing or changing this secret will invalidate all existing tokens.
 */
-func (a *Auth) JWTInit(secret string, expiry ...time.Duration) error {
+func (a *Auth) JWTInit(ctx context.Context, secret string, expiry ...time.Duration) error {
 	if secret == "" {
 		return ErrJWTSecretMissing
 	}
@@ -45,7 +46,7 @@ GenerateToken creates a new, signed JWT for a given username.
 It supports an optional variadic expiryDuration for backward compatibility.
 If no duration is provided, it falls back to the configured a.jwtExpiry.
 */
-func (a *Auth) GenerateToken(username string, expiryDuration ...time.Duration) (string, error) {
+func (a *Auth) GenerateToken(ctx context.Context, username string, expiryDuration ...time.Duration) (string, error) {
 	if username == "" {
 		return "", ErrEmptyInput
 	}
@@ -89,7 +90,7 @@ and returns the JWTClaims if the token is valid.
 It is recommended to use users.go->LoginJWT() instead, as this
 function may change.
 */
-func (a *Auth) ValidateToken(tokenString string) (*JWTClaims, error) {
+func (a *Auth) ValidateToken(ctx context.Context, tokenString string) (*JWTClaims, error) {
 	if len(a.jwtSecret) == 0 {
 		return nil, ErrNotInitialized
 	}

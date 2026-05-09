@@ -21,7 +21,7 @@ type googleUser struct {
 OAuthInit initializes the Google OAuth configuration.
 It uses sync.Once to safely set the configuration once for this Auth instance.
 */
-func (a *Auth) OAuthInit(clientID, clientSecret, redirectURL string) error {
+func (a *Auth) OAuthInit(ctx context.Context, clientID, clientSecret, redirectURL string) error {
 	if clientID == "" || clientSecret == "" || redirectURL == "" {
 		return ErrEmptyInput
 	}
@@ -44,7 +44,7 @@ func (a *Auth) OAuthInit(clientID, clientSecret, redirectURL string) error {
 /*
 GetGoogleLoginURL generates the URL to the Google consent screen.
 */
-func (a *Auth) GetGoogleLoginURL(state string) (string, error) {
+func (a *Auth) GetGoogleLoginURL(ctx context.Context, state string) (string, error) {
 	if state == "" {
 		return "", ErrEmptyInput
 	}
@@ -95,7 +95,7 @@ func (a *Auth) HandleGoogleCallback(ctx context.Context, code string) (string, e
 		return "", err
 	}
 
-	jwtStr, err := a.GenerateToken(user.Email)
+	jwtStr, err := a.GenerateToken(ctx, user.Email)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate jwt after oauth login: %w", err)
 	}

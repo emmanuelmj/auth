@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/mail"
+	"unicode"
 )
 
+/* generateSalt generates a cryptographic salt of the specified size. */
 func generateSalt(size int) (string, error) {
 	salt := make([]byte, size)
 	_, err := rand.Read(salt)
@@ -17,14 +19,49 @@ func generateSalt(size int) (string, error) {
 	return base64.RawStdEncoding.EncodeToString(salt), nil
 }
 
-func (a *Auth) LoginUser(username, password string) error {
-	if a.Conn == nil {
+/* validatePassword checks if a password meets the configured PasswordPolicy. */
+func (a *Auth) validatePassword(password string) error {
+	if len(password) < a.passwordPolicy.MinLength {
+		return fmt.Errorf("password must be at least %d characters", a.passwordPolicy.MinLength)
+	}
+	if len(password) > a.passwordPolicy.MaxLength {
+		return fmt.Errorf("password cannot exceed %d characters", a.passwordPolicy.MaxLength)
+	}
+	
+	if a.passwordPolicy.RequireUppercase || a.passwordPolicy.RequireNumber || a.passwordPolicy.RequireSpecial {
+		var hasUpper, hasNumber, hasSpecial bool
+		for _, char := range password {
+			switch {
+			case unicode.IsUpper(char):
+				hasUpper = true
+			case unicode.IsNumber(char):
+				hasNumber = true
+			case unicode.IsPunct(char) || unicode.IsSymbol(char):
+				hasSpecial = true
+			}
+		}
+		
+		if a.passwordPolicy.RequireUppercase && !hasUpper {
+			return fmt.Errorf("password must contain at least one uppercase letter")
+		}
+		if a.passwordPolicy.RequireNumber && !hasNumber {
+			return fmt.Errorf("password must contain at least one number")
+		}
+		if a.passwordPolicy.RequireSpecial && !hasSpecial {
+			return fmt.Errorf("password must contain at least one special character")
+		}
+	}
+	
+	return nil
+}
+
+/* LoginUser attempts to log a user in using their username and password. */
+func (a *Auth) LoginUser(ctx context.Context, username, password string) error {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
-	var storedHash, storedSalt string
-	query := "SELECT password_hash, salt FROM users WHERE user_id = $1"
-	err := a.Conn.QueryRow(a.ctx, query, username).Scan(&storedHash, &storedSalt)
+	storedHash, storedSalt, err := a.storage.GetUserHashAndSalt(ctx, username)
 	if err != nil {
 		return ErrUserNotFound
 	}
@@ -45,18 +82,18 @@ LoginJWT validates a token string by calling auth.ValidateToken (JWT login).
 This is the recommended way to validate a user's JWT.
 It returns the claims if the token is valid.
 */
-func (a *Auth) LoginJWT(tokenString string) (*JWTClaims, error) {
-	/*
-		We call ValidateToken from jwt.go to handle the logic.
-		This keeps all user login methods in users.go, but all
-		JWT logic in jwt.go.
-	*/
-	return a.ValidateToken(tokenString)
+func (a *Auth) LoginJWT(ctx context.Context, tokenString string) (*JWTClaims, error) {
+	return a.ValidateToken(ctx, tokenString)
 }
 
-func (a *Auth) RegisterUser(username, password string) error {
-	if a.Conn == nil {
+/* RegisterUser creates a new user with the given username and password. */
+func (a *Auth) RegisterUser(ctx context.Context, username, password string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
+	}
+
+	if err := a.validatePassword(password); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 
 	salt, err := generateSalt(32)
@@ -66,20 +103,21 @@ func (a *Auth) RegisterUser(username, password string) error {
 
 	hash := a.HashPassword(password, salt)
 
-	_, err = a.Conn.Exec(a.ctx,
-		"INSERT INTO users (user_id, password_hash, salt) VALUES ($1, $2, $3)",
-		username, hash, salt,
-	)
-	if err != nil {
+	if err := a.storage.InsertUser(ctx, username, hash, salt); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (a *Auth) ChangePass(username, newPassword string) error {
-	if a.Conn == nil {
+/* ChangePass changes a user's password to a new one. */
+func (a *Auth) ChangePass(ctx context.Context, username, newPassword string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
+	}
+
+	if err := a.validatePassword(newPassword); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 
 	newSalt, err := generateSalt(32)
@@ -89,82 +127,59 @@ func (a *Auth) ChangePass(username, newPassword string) error {
 
 	newHash := a.HashPassword(newPassword, newSalt)
 
-	cmdTag, err := a.Conn.Exec(a.ctx,
-		"UPDATE users SET password_hash = $1, salt = $2 WHERE user_id = $3",
-		newHash, newSalt, username,
-	)
+	rowsAffected, err := a.storage.UpdateUserPassword(ctx, username, newHash, newSalt)
 	if err != nil {
 		return fmt.Errorf("%w: database error while updating password: %v", ErrDatabaseUnavailable, err)
 	}
 
-	if cmdTag.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		return ErrUserNotFound
 	}
 
 	return nil
 }
 
-func (a *Auth) DeleteUser(username string) error {
-	if a.Conn == nil {
-		return ErrNotInitialized
+/* DeleteUser completely removes a user and their associated data from the system. */
+func (a *Auth) DeleteUser(ctx context.Context, username string) error {
+	if a.storage == nil {
+		return ErrDatabaseUnavailable
 	}
 
-	_, err := a.Conn.Exec(
-		a.ctx,
-		"DELETE FROM users WHERE user_id = $1",
-		username,
-	)
-
-	if err != nil {
-		return err
+	if err := a.storage.DeleteUser(ctx, username); err != nil {
+		return fmt.Errorf("%w: database error while deleting user: %v", ErrDatabaseUnavailable, err)
 	}
+
 	return nil
 }
 
+/* UserExists checks if a user with the given username exists in the system. */
+func (a *Auth) UserExists(ctx context.Context, userEmail string) (bool, error) {
+	if a.storage == nil {
+		return false, ErrDatabaseUnavailable
+	}
+
+	exists, err := a.storage.UserExists(ctx, userEmail)
+	if err != nil {
+		return false, fmt.Errorf("%w: database error while checking user existence: %v", ErrDatabaseUnavailable, err)
+	}
+
+	return exists, nil
+}
+
+/* User contains basic information about a user in the system. */
 type User struct {
 	UserID string `json:"user_id"`
 }
 
-func (a *Auth) UserExists(userEmail string) (bool, error) {
-	if _, err := mail.ParseAddress(userEmail); err != nil {
-		return false, ErrInvalidEmail
-	}
-	if a.Conn == nil {
-		return false, ErrDatabaseUnavailable
-	}
-
-	var exists bool
-	query := "SELECT EXISTS(SELECT 1 FROM users WHERE user_id = $1)"
-	err := a.Conn.QueryRow(a.ctx, query, userEmail).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	return exists, nil
-}
-
-func (a *Auth) ListUsers(limit, offset int) ([]User, error) {
-	if a.Conn == nil {
+/* ListUsers returns a paginated list of users. */
+func (a *Auth) ListUsers(ctx context.Context, limit, offset int) ([]User, error) {
+	if a.storage == nil {
 		return nil, ErrDatabaseUnavailable
 	}
 
-	query := "SELECT user_id FROM users LIMIT $1 OFFSET $2"
-	rows, err := a.Conn.Query(a.ctx, query, limit, offset)
+	users, err := a.storage.ListUsers(ctx, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	defer rows.Close()
-
-	var users []User
-	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.UserID); err != nil {
-			return nil, fmt.Errorf("failed to scan user: %w", err)
-		}
-		users = append(users, u)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
 	}
 
 	return users, nil
@@ -175,7 +190,7 @@ upsertOAuthUser safely inserts an OAuth user into the database without a real pa
 Uses placeholder values for password_hash and salt to maintain NOT NULL constraints.
 */
 func (a *Auth) upsertOAuthUser(ctx context.Context, email string) error {
-	if a.Conn == nil {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
@@ -183,15 +198,7 @@ func (a *Auth) upsertOAuthUser(ctx context.Context, email string) error {
 		return ErrInvalidEmail
 	}
 
-	const placeholderHash = "OAUTH_MANAGED"
-	const placeholderSalt = "OAUTH_MANAGED_SALT_16B"
-	query := `
-		INSERT INTO users (user_id, password_hash, salt) 
-		VALUES ($1, $2, $3) 
-		ON CONFLICT (user_id) DO NOTHING
-	`
-	_, err := a.Conn.Exec(ctx, query, email, placeholderHash, placeholderSalt)
-	if err != nil {
+	if err := a.storage.UpsertOAuthUser(ctx, email); err != nil {
 		return fmt.Errorf("failed to upsert oauth user: %w", err)
 	}
 

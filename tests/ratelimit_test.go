@@ -263,11 +263,10 @@ func TestRedisRateLimiterInitFailure(t *testing.T) {
 }
 
 func TestRedisRateLimiterAllow(t *testing.T) {
-	skipIfShort(t)
-	a := setupTestAuth(t)
-	if !setupRedis(t, a) {
+	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+	a := setupTestAuth(t, withRedisOption(t))
 
 	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 3,
@@ -290,11 +289,10 @@ func TestRedisRateLimiterAllow(t *testing.T) {
 }
 
 func TestRedisRateLimiterRemaining(t *testing.T) {
-	skipIfShort(t)
-	a := setupTestAuth(t)
-	if !setupRedis(t, a) {
+	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+	a := setupTestAuth(t, withRedisOption(t))
 
 	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 5,
@@ -315,11 +313,10 @@ func TestRedisRateLimiterRemaining(t *testing.T) {
 }
 
 func TestRedisRateLimiterReset(t *testing.T) {
-	skipIfShort(t)
-	a := setupTestAuth(t)
-	if !setupRedis(t, a) {
+	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+	a := setupTestAuth(t, withRedisOption(t))
 
 	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
@@ -342,11 +339,10 @@ func TestRedisRateLimiterReset(t *testing.T) {
 }
 
 func TestRedisRateLimiterExpiry(t *testing.T) {
-	skipIfShort(t)
-	a := setupTestAuth(t)
-	if !setupRedis(t, a) {
+	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+	a := setupTestAuth(t, withRedisOption(t))
 
 	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,

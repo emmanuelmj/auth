@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"math/big"
@@ -11,7 +12,7 @@ import (
 )
 
 /* OTPInit configures the OTP settings. If values are 0, defaults are used. */
-func (a *Auth) OTPInit(length int, expiry time.Duration) error {
+func (a *Auth) OTPInit(ctx context.Context, length int, expiry time.Duration) error {
 	if length < 4 || length > 10 {
 		return fmt.Errorf("%w: length %d (must be between 4 and 10)", ErrInvalidInput, length)
 	}
@@ -48,11 +49,11 @@ func (a *Auth) generateOTP() (string, error) {
 SendOTP generates an OTP, saves it to the DB (upsert), and emails it.
 Usage: auth.SendOTP("user@example.com")
 */
-func (a *Auth) SendOTP(userEmail string) error {
+func (a *Auth) SendOTP(ctx context.Context, userEmail string) error {
 	if _, err := mail.ParseAddress(userEmail); err != nil {
 		return ErrInvalidEmail
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 	if a.smtpHost == "" {
@@ -70,15 +71,9 @@ func (a *Auth) SendOTP(userEmail string) error {
 		return fmt.Errorf("%w: duration %v", ErrInvalidInput, a.otpExpiry)
 	}
 	expiry := time.Now().Add(a.otpExpiry)
-	/* 3. Upsert into DB (Update if email exists, Insert if new) */
-	query := `
-		INSERT INTO otps (email, code, expires_at) 
-		VALUES ($1, $2, $3)
-		ON CONFLICT (email) 
-		DO UPDATE SET code = $2, expires_at = $3
-	`
-	_, err = a.Conn.Exec(a.ctx, query, userEmail, code, expiry)
-	if err != nil {
+	
+	/* 3. Upsert into DB */
+	if err := a.storage.InsertOTP(ctx, userEmail, code, expiry); err != nil {
 		return fmt.Errorf("db error saving OTP: %w", err)
 	}
 
@@ -89,7 +84,7 @@ func (a *Auth) SendOTP(userEmail string) error {
 	body := fmt.Sprintf("Your OTP is: %s\n\nValid for %d minutes.", code, minutes)
 	err = email.Send(
 		a.smtpHost, a.smtpPort,
-		a.smtpEmail, a.smtpPassword,
+		a.smtpEmail, string(a.smtpPassword),
 		userEmail, subject, body,
 	)
 	if err != nil {
@@ -103,20 +98,16 @@ func (a *Auth) SendOTP(userEmail string) error {
 VerifyOTP checks if the code is correct and not expired.
 If valid, it deletes the OTP to prevent reuse.
 */
-func (a *Auth) VerifyOTP(userEmail, inputCode string) error {
+func (a *Auth) VerifyOTP(ctx context.Context, userEmail, inputCode string) error {
 	if _, err := mail.ParseAddress(userEmail); err != nil {
 		return ErrInvalidEmail
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
-	var storedCode string
-	var expiry time.Time
-
 	/* Get the OTP */
-	query := "SELECT code, expires_at FROM otps WHERE email = $1"
-	err := a.Conn.QueryRow(a.ctx, query, userEmail).Scan(&storedCode, &expiry)
+	storedCode, expiry, err := a.storage.GetOTP(ctx, userEmail)
 	if err != nil {
 		return ErrInvalidOTP /* OTP not found */
 	}
@@ -130,7 +121,7 @@ func (a *Auth) VerifyOTP(userEmail, inputCode string) error {
 	}
 
 	/* Valid! Delete it. */
-	_, _ = a.Conn.Exec(a.ctx, "DELETE FROM otps WHERE email = $1", userEmail)
+	_ = a.storage.DeleteOTP(ctx, userEmail)
 	return nil
 }
 
@@ -152,8 +143,8 @@ func (a *Auth) startOTPCleanup() {
 			select {
 			case <-ticker.C:
 				/* The Timer ticked: Do the work */
-				if a.Conn != nil {
-					_, _ = a.Conn.Exec(a.ctx, "DELETE FROM otps WHERE expires_at < NOW()")
+				if a.storage != nil {
+					_ = a.storage.CleanupExpiredOTPs(a.ctx)
 				}
 
 			case <-a.ctx.Done():
@@ -165,47 +156,35 @@ func (a *Auth) startOTPCleanup() {
 	}()
 }
 
-func (a *Auth) OTPExists(userEmail string) (bool, error) {
+func (a *Auth) OTPExists(ctx context.Context, userEmail string) (bool, error) {
 	if _, err := mail.ParseAddress(userEmail); err != nil {
 		return false, ErrInvalidEmail
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return false, ErrDatabaseUnavailable
 	}
 
-	var exists bool
-	query := "SELECT EXISTS(SELECT 1 FROM otps WHERE email = $1 AND expires_at > NOW())"
-	err := a.Conn.QueryRow(a.ctx, query, userEmail).Scan(&exists)
+	_, expiry, err := a.storage.GetOTP(ctx, userEmail)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
+		/* if error, it means it doesn't exist or other db error */
+		return false, nil
 	}
 
-	return exists, nil
+	if time.Now().After(expiry) {
+		return false, nil
+	}
+
+	return true, nil
 }
 
-func (a *Auth) ListActiveOTPs(limit, offset int) ([]string, error) {
-	if a.Conn == nil {
+func (a *Auth) ListActiveOTPs(ctx context.Context, limit, offset int) ([]string, error) {
+	if a.storage == nil {
 		return nil, ErrDatabaseUnavailable
 	}
 
-	query := "SELECT email FROM otps WHERE expires_at > NOW() LIMIT $1 OFFSET $2"
-	rows, err := a.Conn.Query(a.ctx, query, limit, offset)
+	emails, err := a.storage.ListActiveOTPs(ctx, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	defer rows.Close()
-
-	var emails []string
-	for rows.Next() {
-		var email string
-		if err := rows.Scan(&email); err != nil {
-			return nil, fmt.Errorf("failed to scan email: %w", err)
-		}
-		emails = append(emails, email)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
 	}
 
 	return emails, nil

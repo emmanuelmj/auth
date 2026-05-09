@@ -1,67 +1,45 @@
 package auth
 
+import "context"
+
 /* CreatePermissions assigns a role to a user within a specific space. */
-func (a *Auth) CreatePermissions(username, spaceName, role string) error {
-	if a.Conn == nil {
+func (a *Auth) CreatePermissions(ctx context.Context, username, spaceName, role string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 
-	_, err := a.Conn.Exec(
-		a.ctx,
-		"INSERT INTO permissions(user_id, spaceName, role) VALUES ($1, $2, $3)",
-		username, spaceName, role,
-	)
-
-	if err != nil {
+	if err := a.storage.InsertPermission(ctx, username, spaceName, role); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (a *Auth) CheckPermissions(username, spaceName, role string) error {
-	if a.Conn == nil {
+/* CheckPermissions verifies if a user has a specific role within a space. */
+func (a *Auth) CheckPermissions(ctx context.Context, username, spaceName, role string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 
-	var exists bool
-	query := `
-		SELECT EXISTS (
-			SELECT 1
-			FROM permissions 
-			WHERE user_id = $1
-			AND spaceName = $2
-			AND role = $3
-		)
-	`
-
-	err := a.Conn.QueryRow(a.ctx, query, username, spaceName, role).Scan(&exists)
+	hasPerm, err := a.storage.CheckPermissionExists(ctx, username, spaceName, role)
 	if err != nil {
 		return ErrDatabaseUnavailable
 	}
 
-	if !exists {
+	if !hasPerm {
 		return ErrInvalidCredentials
 	}
 
 	return nil
 }
 
-func (a *Auth) DeletePermission(username, spaceName, role string) error {
-	if a.Conn == nil {
+/* DeletePermission removes a specific role assignment from a user in a space. */
+func (a *Auth) DeletePermission(ctx context.Context, username, spaceName, role string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 
-	query := `
-		DELETE FROM permissions
-		WHERE user_id = $1
-		AND spaceName = $2
-		AND role = $3
-	`
-
-	_, err := a.Conn.Exec(a.ctx, query, username, spaceName, role)
-
-	if err != nil {
+	if err := a.storage.DeletePermission(ctx, username, spaceName, role); err != nil {
 		return err
 	}
 

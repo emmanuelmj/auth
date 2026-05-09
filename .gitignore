@@ -1,3 +1,9 @@
 /bin
 /test
 *.patch
+*.exe
+*.test.exe
+test_out.txt
+fix_tests.py
+rewrite_db.py
+rewrite_tests.py
