@@ -31,8 +31,6 @@ type RefreshTokenConfig struct {
 	TokenLength int
 }
 
-
-
 /*
 GenerateRefreshToken creates a new opaque refresh token for the given user,
 stores it in the database, and returns the token string.
@@ -94,7 +92,9 @@ func (a *Auth) ValidateRefreshToken(ctx context.Context, token string) (string, 
 	}
 
 	ch := a.requestGroup.DoChan("validate_refresh:"+token, func() (interface{}, error) {
-		userID, expiresAt, revoked, err := a.storage.GetRefreshToken(ctx, token)
+		/* Use a detached context so no single caller's cancellation aborts the shared DB flight. */
+		dbCtx := context.WithoutCancel(ctx)
+		userID, expiresAt, revoked, err := a.storage.GetRefreshToken(dbCtx, token)
 		if err != nil {
 			return "", ErrRefreshTokenInvalid
 		}
@@ -111,10 +111,10 @@ func (a *Auth) ValidateRefreshToken(ctx context.Context, token string) (string, 
 			ttl := time.Until(expiresAt)
 			if ttl > 0 {
 				pipe := a.redisClient.Pipeline()
-				pipe.Set(ctx, "refresh:"+token, userID, ttl)
-				pipe.SAdd(ctx, "user_tokens:"+userID, token)
-				pipe.Expire(ctx, "user_tokens:"+userID, a.refreshTokenExpiry)
-				_, _ = pipe.Exec(ctx)
+				pipe.Set(dbCtx, "refresh:"+token, userID, ttl)
+				pipe.SAdd(dbCtx, "user_tokens:"+userID, token)
+				pipe.Expire(dbCtx, "user_tokens:"+userID, a.refreshTokenExpiry)
+				_, _ = pipe.Exec(dbCtx)
 			}
 		}
 
@@ -198,6 +198,12 @@ func (a *Auth) RevokeAllUserRefreshTokens(ctx context.Context, userID string) er
 		return ErrDatabaseUnavailable
 	}
 
+	/* DB is the source of truth: revoke there first. */
+	if err := a.storage.RevokeAllUserRefreshTokens(ctx, userID); err != nil {
+		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
+	}
+
+	/* Only invalidate the cache after a successful DB write. */
 	if a.redisClient != nil {
 		tokens, err := a.redisClient.SMembers(ctx, "user_tokens:"+userID).Result()
 		if err == nil && len(tokens) > 0 {
@@ -210,10 +216,6 @@ func (a *Auth) RevokeAllUserRefreshTokens(ctx context.Context, userID string) er
 			pipe.Del(ctx, "user_tokens:"+userID)
 			_, _ = pipe.Exec(ctx)
 		}
-	}
-
-	if err := a.storage.RevokeAllUserRefreshTokens(ctx, userID); err != nil {
-		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
 	}
 
 	return nil

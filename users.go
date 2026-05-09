@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/mail"
 	"unicode"
+
+	"github.com/jackc/pgx/v5"
 )
 
 /* generateSalt generates a cryptographic salt of the specified size. */
@@ -27,7 +30,7 @@ func (a *Auth) validatePassword(password string) error {
 	if len(password) > a.passwordPolicy.MaxLength {
 		return fmt.Errorf("password cannot exceed %d characters", a.passwordPolicy.MaxLength)
 	}
-	
+
 	if a.passwordPolicy.RequireUppercase || a.passwordPolicy.RequireNumber || a.passwordPolicy.RequireSpecial {
 		var hasUpper, hasNumber, hasSpecial bool
 		for _, char := range password {
@@ -40,7 +43,7 @@ func (a *Auth) validatePassword(password string) error {
 				hasSpecial = true
 			}
 		}
-		
+
 		if a.passwordPolicy.RequireUppercase && !hasUpper {
 			return fmt.Errorf("password must contain at least one uppercase letter")
 		}
@@ -51,7 +54,7 @@ func (a *Auth) validatePassword(password string) error {
 			return fmt.Errorf("password must contain at least one special character")
 		}
 	}
-	
+
 	return nil
 }
 
@@ -63,7 +66,10 @@ func (a *Auth) LoginUser(ctx context.Context, username, password string) error {
 
 	storedHash, storedSalt, err := a.storage.GetUserHashAndSalt(ctx, username)
 	if err != nil {
-		return ErrUserNotFound
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return ErrDatabaseUnavailable
 	}
 
 	if storedHash == "OAUTH_MANAGED" {
@@ -101,7 +107,10 @@ func (a *Auth) RegisterUser(ctx context.Context, username, password string) erro
 		return err
 	}
 
-	hash := a.HashPassword(password, salt)
+	hash, err := a.HashPassword(password, salt)
+	if err != nil {
+		return err
+	}
 
 	if err := a.storage.InsertUser(ctx, username, hash, salt); err != nil {
 		return err
@@ -125,7 +134,10 @@ func (a *Auth) ChangePass(ctx context.Context, username, newPassword string) err
 		return fmt.Errorf("%w: could not generate new salt: %v", ErrInvalidInput, err)
 	}
 
-	newHash := a.HashPassword(newPassword, newSalt)
+	newHash, err := a.HashPassword(newPassword, newSalt)
+	if err != nil {
+		return fmt.Errorf("%w: could not hash new password: %v", ErrInvalidInput, err)
+	}
 
 	rowsAffected, err := a.storage.UpdateUserPassword(ctx, username, newHash, newSalt)
 	if err != nil {
