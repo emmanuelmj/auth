@@ -1,9 +1,10 @@
 /bin
 /test
-*.patch
+
+# Compiled binaries and test artifacts
 *.exe
 *.test.exe
-test_out.txt
-fix_tests.py
-rewrite_db.py
-rewrite_tests.py
+test_out*.txt
+
+# Helper / one-off scripts (never belong in the repo)
+*.py
