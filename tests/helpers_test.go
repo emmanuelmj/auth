@@ -2,6 +2,9 @@ package tests
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
@@ -120,4 +123,15 @@ func isRedisAvailable(t *testing.T) bool {
 func withJWTOption(t *testing.T, secret string, expiry time.Duration) auth.Option {
 	t.Helper()
 	return auth.WithJWT([]byte(secret), expiry)
+}
+
+/*
+computeTestOTPHash mirrors the library's HMAC-SHA256 keyed with the
+test pepper so that tests inserting OTPs directly into the database
+produce a hash that VerifyOTP can verify.
+*/
+func computeTestOTPHash(code string) string {
+	mac := hmac.New(sha256.New, []byte("test_pepper"))
+	mac.Write([]byte(code))
+	return hex.EncodeToString(mac.Sum(nil))
 }
