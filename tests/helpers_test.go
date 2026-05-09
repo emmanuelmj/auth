@@ -10,6 +10,7 @@ import (
 	"time"
 
 	auth "github.com/GCET-Open-Source-Foundation/auth"
+	authpg "github.com/GCET-Open-Source-Foundation/auth/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -49,7 +50,7 @@ func setupTestAuth(t *testing.T, opts ...auth.Option) *auth.Auth {
 	*/
 	preCleanDB(t, ctx)
 
-	storage, err := auth.NewPostgresStorage(ctx, testDBPort, testDBUser, testDBPass, testDBName, testDBHost)
+	storage, err := authpg.NewPostgresStorage(ctx, testDBPort, testDBUser, testDBPass, testDBName, testDBHost)
 	if err != nil {
 		t.Fatalf("failed to create PostgresStorage: %v", err)
 	}

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/mail"
 	"unicode"
-
-	"github.com/jackc/pgx/v5"
 )
 
 /* generateSalt generates a cryptographic salt of the specified size. */
@@ -66,7 +64,7 @@ func (a *Auth) LoginUser(ctx context.Context, username, password string) error {
 
 	storedHash, storedSalt, err := a.storage.GetUserHashAndSalt(ctx, username)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, ErrUserNotFound) {
 			return ErrUserNotFound
 		}
 		return ErrDatabaseUnavailable

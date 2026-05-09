@@ -1,4 +1,4 @@
-package auth
+package postgres
 
 import (
 	"context"
@@ -6,51 +6,12 @@ import (
 	"net/url"
 	"time"
 
+	auth "github.com/GCET-Open-Source-Foundation/auth"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-/* StorageEngine defines all database operations required by the Auth library. */
-type StorageEngine interface {
-	CheckTables(ctx context.Context) error
-
-	// Users
-	InsertUser(ctx context.Context, username, hash, salt string) error
-	UpdateUserPassword(ctx context.Context, username, hash, salt string) (int64, error)
-	DeleteUser(ctx context.Context, username string) error
-	UserExists(ctx context.Context, username string) (bool, error)
-	GetUserHashAndSalt(ctx context.Context, username string) (hash string, salt string, err error)
-	ListUsers(ctx context.Context, limit, offset int) ([]User, error)
-	UpsertOAuthUser(ctx context.Context, email string) error
-
-	// Spaces
-	InsertSpace(ctx context.Context, name string, authority int) error
-	DeleteSpace(ctx context.Context, name string) error
-
-	// Roles
-	InsertRole(ctx context.Context, role string) error
-	DeleteRole(ctx context.Context, role string) error
-
-	// Permissions
-	InsertPermission(ctx context.Context, username, spaceName, role string) error
-	CheckPermissionExists(ctx context.Context, username, spaceName, role string) (bool, error)
-	DeletePermission(ctx context.Context, username, spaceName, role string) error
-
-	// OTP
-	InsertOTP(ctx context.Context, email, code string, expiresAt time.Time) error
-	GetOTP(ctx context.Context, email string) (code string, expiresAt time.Time, err error)
-	DeleteOTP(ctx context.Context, email string) error
-	ListActiveOTPs(ctx context.Context, limit, offset int) ([]string, error)
-	CleanupExpiredOTPs(ctx context.Context) error
-
-	// Refresh Tokens
-	InsertRefreshToken(ctx context.Context, token, userID string, expiresAt time.Time) error
-	GetRefreshToken(ctx context.Context, token string) (userID string, expiresAt time.Time, revoked bool, err error)
-	RevokeRefreshToken(ctx context.Context, token string) error
-	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
-	CleanupExpiredRefreshTokens(ctx context.Context) error
-}
-
-/* PostgresStorage implements the StorageEngine interface using pgxpool. */
+/* PostgresStorage implements the auth.StorageEngine interface using pgxpool. */
 type PostgresStorage struct {
 	pool *pgxpool.Pool
 }
@@ -58,7 +19,7 @@ type PostgresStorage struct {
 /* NewPostgresStorage creates a new PostgresStorage with an active connection pool. */
 func NewPostgresStorage(ctx context.Context, port uint16, dbUser, dbPass, dbName, host string) (*PostgresStorage, error) {
 	if dbUser == "" || dbName == "" || host == "" {
-		return nil, ErrEmptyInput
+		return nil, auth.ErrEmptyInput
 	}
 	u := &url.URL{
 		Scheme: "postgres",
@@ -151,24 +112,33 @@ func (p *PostgresStorage) UserExists(ctx context.Context, username string) (bool
 	return exists, err
 }
 
-/* GetUserHashAndSalt retrieves the hash and salt for a user. */
+/*
+GetUserHashAndSalt retrieves the hash and salt for a user.
+Returns auth.ErrUserNotFound if the user does not exist.
+*/
 func (p *PostgresStorage) GetUserHashAndSalt(ctx context.Context, username string) (string, string, error) {
 	var storedHash, storedSalt string
 	err := p.pool.QueryRow(ctx, "SELECT password_hash, salt FROM users WHERE user_id = $1", username).Scan(&storedHash, &storedSalt)
-	return storedHash, storedSalt, err
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", "", auth.ErrUserNotFound
+		}
+		return "", "", err
+	}
+	return storedHash, storedSalt, nil
 }
 
 /* ListUsers retrieves a list of users. */
-func (p *PostgresStorage) ListUsers(ctx context.Context, limit, offset int) ([]User, error) {
+func (p *PostgresStorage) ListUsers(ctx context.Context, limit, offset int) ([]auth.User, error) {
 	rows, err := p.pool.Query(ctx, "SELECT user_id FROM users LIMIT $1 OFFSET $2", limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var users []User
+	var users []auth.User
 	for rows.Next() {
-		var u User
+		var u auth.User
 		if err := rows.Scan(&u.UserID); err != nil {
 			return nil, err
 		}
@@ -305,7 +275,7 @@ func (p *PostgresStorage) RevokeRefreshToken(ctx context.Context, token string) 
 		return err
 	}
 	if cmdTag.RowsAffected() == 0 {
-		return ErrRefreshTokenInvalid
+		return auth.ErrRefreshTokenInvalid
 	}
 	return nil
 }
