@@ -2,27 +2,76 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net/mail"
-	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/GCET-Open-Source-Foundation/auth/email"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/singleflight"
 )
 
-/* dbDetails holds the configuration required to connect to the PostgreSQL database. */
-type dbDetails struct {
-	port         uint16
-	username     string
-	password     string
-	databaseName string
-	host         string
+/* EmailSender defines the interface for sending emails. */
+type EmailSender interface {
+	SendEmail(ctx context.Context, to, subject, body string) error
 }
 
-const rateLimitScript = `
+/* PasswordPolicy defines constraints for a user's password. */
+type PasswordPolicy struct {
+	MinLength        int
+	MaxLength        int
+	RequireUppercase bool
+	RequireNumber    bool
+	RequireSpecial   bool
+}
+
+/* Auth manages the internal state of the library, including database connections, */
+/* cryptographic parameters, and caching clients. It is safe for concurrent use. */
+type Auth struct {
+	storage            StorageEngine
+	argonParams        ArgonParameters
+	pepper             []byte
+	jwtSecret          []byte
+	jwtExpiry          time.Duration
+	otpExpiry          time.Duration
+	otpLength          int
+	emailSender        EmailSender
+	refreshTokenExpiry time.Duration
+	refreshTokenLength int
+	otpEnabled         bool
+	cancel             context.CancelFunc
+	oauthConfig        *oauth2.Config
+	redisClient        *redis.Client
+	requestGroup       singleflight.Group
+	rateLimitSHA       string
+	passwordPolicy     PasswordPolicy
+}
+
+/* Option is a functional option for configuring the Auth instance. */
+type Option func(*Auth) error
+
+/* WithStorage configures the Auth instance with a specific StorageEngine. */
+func WithStorage(storage StorageEngine) Option {
+	return func(a *Auth) error {
+		if storage == nil {
+			return ErrEmptyInput
+		}
+		a.storage = storage
+		return nil
+	}
+}
+
+/* WithRedis configures the Auth instance with a Redis client for caching and rate-limiting. */
+func WithRedis(client *redis.Client) Option {
+	return func(a *Auth) error {
+		if client == nil {
+			return ErrEmptyInput
+		}
+		a.redisClient = client
+
+		/* Attempt to load the rate limit script */
+		const rateLimitScript = `
 local window = tonumber(ARGV[1])
 local limit = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
@@ -41,185 +90,243 @@ redis.call('PEXPIRE', KEYS[1], window)
 return 1
 `
 
-/* Auth manages the internal state of the library, including database connections, */
-/* cryptographic parameters, and caching clients. It is safe for concurrent use. */
-type Auth struct {
-	Conn               *pgxpool.Pool
-	argonParams        ArgonParameters
-	pepper             string
-	pepperOnce         sync.Once
-	jwtSecret          []byte
-	jwtExpiry          time.Duration
-	otpExpiry          time.Duration
-	otpLength          int
-	jwtOnce            sync.Once
-	smtpEmail          string
-	smtpPassword       string
-	smtpHost           string
-	smtpPort           string
-	smtp_once          sync.Once
-	refreshTokenExpiry time.Duration
-	refreshTokenLength int
-	ctx                context.Context
-	cancel             context.CancelFunc
-	oauthConfig        *oauth2.Config
-	oauthOnce          sync.Once
-	redisClient        *redis.Client
-	requestGroup       singleflight.Group
-	rateLimitSHA       string
-}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-/*
-NewBareAuth creates a "bare" Auth instance with default cryptographic parameters
-but NO database connection. This is intended strictly for unit testing
-non-database functions like password hashing.
-*/
-func NewBareAuth() *Auth {
-	return &Auth{
-		argonParams: globalDefaultArgon,
-		jwtExpiry:   24 * time.Hour,
-		otpExpiry:   5 * time.Minute,
-		otpLength:   6,
-	}
-}
-
-/*
-Init configures the dbDetails, Connects to the database,
-checks schemas, and returns a fully initialized Auth struct.
-Init takes context info, db username, db password, db name, host url (e.g. localhost)
-*/
-func Init(ctx context.Context, port uint16, dbUser, dbPass, dbName, host string) (*Auth, error) {
-	if dbUser == "" || dbName == "" || host == "" {
-		return nil, ErrEmptyInput
-	}
-	dbTemp := dbDetails{
-		port:         port,
-		username:     dbUser,
-		password:     dbPass,
-		databaseName: dbName,
-		host:         host,
-	}
-
-	pool, err := dbConnect(ctx, &dbTemp)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	if pool == nil {
-		return nil, ErrDatabaseUnavailable
-	}
-
-	/* Create a context for the Auth library's lifecycle */
-	/* context.WithCancel returns a context and a function to cancel it */
-	libCtx, libCancel := context.WithCancel(ctx)
-
-	/* No errors in init */
-	temp := &Auth{
-		Conn:        pool,
-		argonParams: globalDefaultArgon,
-		jwtExpiry:   24 * time.Hour,
-		otpExpiry:   5 * time.Minute,
-		otpLength:   6,
-		ctx:         libCtx,
-		cancel:      libCancel,
-	}
-
-	if err := temp.checkTables(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	/* start the background OTP cleaner */
-	temp.startOTPCleanup()
-
-	return temp, nil
-}
-
-/*
-SMTPInit sets the SMTP server details and credentials.
-This must be called once at startup if you intend to use OTP features.
-It stores the credentials in memory only.
-*/
-func (a *Auth) SMTPInit(email, password, host, port string) error {
-	if email == "" || password == "" || host == "" || port == "" {
-		return ErrEmptyInput
-	}
-	if _, err := mail.ParseAddress(email); err != nil {
-		return ErrInvalidEmail
-	}
-
-	a.smtp_once.Do(func() {
-		a.smtpEmail = email
-		a.smtpPassword = password
-		a.smtpHost = host
-		a.smtpPort = port
-	})
-	return nil
-}
-
-/*
-RedisInit initializes the Redis client for caching and rate limiting.
-It verifies the connection by sending a Ping.
-*/
-func (a *Auth) RedisInit(addr, password string, db int) error {
-	if addr == "" {
-		return ErrEmptyInput
-	}
-
-	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	})
-
-	if err := client.Ping(a.ctx).Err(); err != nil {
-		client.Close()
-		return fmt.Errorf("%w: failed to connect to redis: %v", ErrRedisUnavailable, err)
-	}
-
-	sha, err := client.ScriptLoad(a.ctx, rateLimitScript).Result()
-	if err != nil {
-		client.Close()
-		return fmt.Errorf("failed to load rate limit lua script: %w", err)
-	}
-
-	a.redisClient = client
-	a.rateLimitSHA = sha
-	return nil
-}
-
-/*
-Close performs a graceful shutdown of the Auth library.
-It stops background tasks, closes database Connections, and wipes sensitive data from memory.
-*/
-func (a *Auth) Close() {
-	/* 1. Stop background routines (OTP cleaner) */
-	if a.cancel != nil {
-		a.cancel() /* This sends the signal to otp.go to stop!*/
-	}
-
-	/* 2. Close Database Connection */
-	if a.Conn != nil {
-		a.Conn.Close()
-		a.Conn = nil
-	}
-
-	/* 3. Wipe Sensitive Memory (Security Best Practice) */
-	/* Overwrite JWT secret with zeros */
-	if len(a.jwtSecret) > 0 {
-		for i := range a.jwtSecret {
-			a.jwtSecret[i] = 0
+		sha, err := client.ScriptLoad(ctx, rateLimitScript).Result()
+		if err != nil {
+			return fmt.Errorf("failed to load redis rate limit script: %w", err)
 		}
-		a.jwtSecret = nil
+		a.rateLimitSHA = sha
+		return nil
+	}
+}
+
+/* WithRefreshToken sets the duration for which a refresh token is valid and its length. */
+func WithRefreshToken(expiry time.Duration, length int) Option {
+	return func(a *Auth) error {
+		if expiry <= 0 {
+			return ErrInvalidInput
+		}
+		a.refreshTokenExpiry = expiry
+		if length <= 0 {
+			length = 32
+		}
+		a.refreshTokenLength = length
+		return nil
+	}
+}
+
+/* WithOTP configures the OTP length and expiration time. */
+func WithOTP(length int, expiry time.Duration) Option {
+	return func(a *Auth) error {
+		if length <= 0 {
+			length = 6
+		}
+		if expiry <= 0 {
+			expiry = 5 * time.Minute
+		}
+		a.otpLength = length
+		a.otpExpiry = expiry
+		a.otpEnabled = true
+		return nil
+	}
+}
+
+/*
+	WithJWT configures the JWT signing secret and expiration time.
+
+If expiry is 0 or negative the pre-seeded default of 24 hours is kept.
+*/
+func WithJWT(secret []byte, expiry time.Duration) Option {
+	return func(a *Auth) error {
+		if len(secret) == 0 {
+			return ErrEmptyInput
+		}
+		a.jwtSecret = append([]byte(nil), secret...) /* defensive copy */
+		if expiry > 0 {
+			a.jwtExpiry = expiry
+		}
+		/* expiry == 0 → keep the 24 h default already set in New(). */
+		return nil
+	}
+}
+
+/* WithEmailSender configures the Auth instance to use a custom EmailSender. */
+func WithEmailSender(sender EmailSender) Option {
+	return func(a *Auth) error {
+		if sender == nil {
+			return ErrEmptyInput
+		}
+		a.emailSender = sender
+		return nil
+	}
+}
+
+type smtpEmailSender struct {
+	email    string
+	password []byte
+	host     string
+	port     string
+}
+
+func (s *smtpEmailSender) SendEmail(ctx context.Context, to, subject, body string) error {
+	return email.Send(s.host, s.port, s.email, string(s.password), to, subject, body)
+}
+
+/* WithSMTP configures the SMTP server details for sending emails (e.g., OTP). */
+func WithSMTP(email, password, host, port string) Option {
+	return func(a *Auth) error {
+		if email == "" || password == "" || host == "" || port == "" {
+			return ErrEmptyInput
+		}
+		a.emailSender = &smtpEmailSender{
+			email:    email,
+			password: []byte(password),
+			host:     host,
+			port:     port,
+		}
+		return nil
+	}
+}
+
+/* WithOAuth configures the Google OAuth settings. */
+func WithOAuth(clientID, clientSecret, redirectURL string) Option {
+	return func(a *Auth) error {
+		if clientID == "" || clientSecret == "" || redirectURL == "" {
+			return ErrEmptyInput
+		}
+		a.oauthConfig = &oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  redirectURL,
+			Scopes: []string{
+				"https://www.googleapis.com/auth/userinfo.email",
+				"https://www.googleapis.com/auth/userinfo.profile",
+			},
+			/* Hardcode Google OAuth endpoints directly to avoid pulling in the
+			   golang.org/x/oauth2/google sub-package as a mandatory dependency. */
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+				TokenURL: "https://oauth2.googleapis.com/token",
+			},
+		}
+		return nil
+	}
+}
+
+/* WithPepper configures the global pepper for password hashing. */
+func WithPepper(pepper []byte) Option {
+	return func(a *Auth) error {
+		if len(pepper) == 0 {
+			return ErrEmptyInput
+		}
+		a.pepper = append([]byte(nil), pepper...)
+		return nil
+	}
+}
+
+/* WithPasswordPolicy configures the rules for valid passwords. */
+func WithPasswordPolicy(policy PasswordPolicy) Option {
+	return func(a *Auth) error {
+		if policy.MinLength <= 0 {
+			policy.MinLength = 12
+		}
+		if policy.MaxLength <= 0 {
+			policy.MaxLength = 72
+		}
+		a.passwordPolicy = policy
+		return nil
+	}
+}
+
+/*
+New initializes an Auth instance and applies the provided Option functions in
+order. If any option returns an error the constructor cancels its internal
+context and propagates the error to the caller.
+
+WithStorage must be provided to enable any database-backed operation
+(login, OTP, refresh tokens). The constructor calls CheckTables to ensure the
+required schema exists before returning. If WithOTP is provided alongside
+WithStorage, a background goroutine is started to periodically purge expired
+OTP rows.
+*/
+func New(ctx context.Context, opts ...Option) (*Auth, error) {
+	ctx, cancel := context.WithCancel(ctx)
+
+	a := &Auth{
+		argonParams:        globalDefaultArgon,
+		jwtExpiry:          24 * time.Hour,
+		otpExpiry:          5 * time.Minute,
+		otpLength:          6,
+		refreshTokenExpiry: 30 * 24 * time.Hour,
+		refreshTokenLength: 32,
+		cancel:             cancel,
+		passwordPolicy: PasswordPolicy{
+			MinLength: 12,
+			MaxLength: 72,
+		},
 	}
 
-	/* Clear string secrets (Go strings are immutable, but we can unassign them) */
-	/* Note: This is best-effort since GC handles actual string memory */
-	a.smtpPassword = ""
-	a.pepper = ""
-	a.oauthConfig = nil
+	for _, opt := range opts {
+		if err := opt(a); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 
-	/* 4. Close Redis Connection */
+	/* Guard: pepper is mandatory when OTP is explicitly enabled. */
+	if a.otpEnabled && len(a.pepper) == 0 {
+		cancel()
+		return nil, errors.New("OTP requires a pepper: configure WithPepper before WithOTP")
+	}
+
+	if a.storage != nil {
+		if err := a.storage.CheckTables(ctx); err != nil {
+			cancel()
+			return nil, fmt.Errorf("failed to check tables: %w", err)
+		}
+	}
+
+	/* Start background OTP cleanup if storage and OTP are configured. */
+	if a.storage != nil && a.otpEnabled {
+		a.startOTPCleanup(ctx)
+	}
+
+	return a, nil
+}
+
+/* Close cancels the internal context, closes any connections, and securely wipes secrets from memory. */
+func (a *Auth) Close() {
+	a.cancel()
+
+	if a.storage != nil {
+		a.storage.Close()
+	}
 	if a.redisClient != nil {
 		a.redisClient.Close()
-		a.redisClient = nil
 	}
+
+	/* Securely zero out memory for secrets */
+	for i := range a.pepper {
+		a.pepper[i] = 0
+	}
+	for i := range a.jwtSecret {
+		a.jwtSecret[i] = 0
+	}
+	if sender, ok := a.emailSender.(*smtpEmailSender); ok {
+		for i := range sender.password {
+			sender.password[i] = 0
+		}
+	}
+}
+
+/* HasStorage returns true if the Auth instance has a valid storage engine configured. */
+func (a *Auth) HasStorage() bool {
+	return a.storage != nil
+}
+
+/* HasRedis returns true if the Auth instance has a valid redis client configured. */
+func (a *Auth) HasRedis() bool {
+	return a.redisClient != nil
 }

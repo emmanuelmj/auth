@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -214,11 +216,24 @@ func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) error {
 	now := time.Now()
 	windowMs := rl.config.Window.Milliseconds()
 	nowMs := now.UnixMilli()
-	member := now.UnixNano()
+
+	/* Generate a cryptographically random unique member.
+	   Using time.UnixNano() is not safe on Windows where the timer resolution
+	   is ~15.6 ms — two rapid calls can return the same nanosecond value,
+	   causing ZADD to overwrite the existing member instead of inserting a new
+	   one, silently under-counting requests and breaking the rate limit. */
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		/* Fail-closed: if we cannot generate a unique member we must deny. */
+		return ErrRateLimitExceeded
+	}
+	member := hex.EncodeToString(raw[:])
 
 	res, err := rl.client.EvalSha(ctx, rl.scriptSHA, []string{"ratelimit:" + key}, windowMs, rl.config.MaxRequests, nowMs, member).Result()
 	if err != nil {
-		return ErrRateLimitBackendDown
+		/* Fail-closed policy: Redis unavailability must not open the door to brute-force attacks. */
+		/* Callers needing fail-open must explicitly catch ErrRateLimitExceeded and inspect context. */
+		return ErrRateLimitExceeded
 	}
 
 	if allowed, ok := res.(int64); ok && allowed == 1 {

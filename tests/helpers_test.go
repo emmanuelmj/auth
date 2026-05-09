@@ -2,11 +2,16 @@ package tests
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
+	"time"
 
 	auth "github.com/GCET-Open-Source-Foundation/auth"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 /*
@@ -31,7 +36,7 @@ each test starts with a clean slate.
 It registers a t.Cleanup callback that closes the Auth instance when the
 test finishes.
 */
-func setupTestAuth(t *testing.T) *auth.Auth {
+func setupTestAuth(t *testing.T, opts ...auth.Option) *auth.Auth {
 	t.Helper()
 	ctx := context.Background()
 
@@ -44,7 +49,18 @@ func setupTestAuth(t *testing.T) *auth.Auth {
 	*/
 	preCleanDB(t, ctx)
 
-	a, err := auth.Init(ctx, testDBPort, testDBUser, testDBPass, testDBName, testDBHost)
+	storage, err := auth.NewPostgresStorage(ctx, testDBPort, testDBUser, testDBPass, testDBName, testDBHost)
+	if err != nil {
+		t.Fatalf("failed to create PostgresStorage: %v", err)
+	}
+
+	defaultOpts := []auth.Option{
+		auth.WithStorage(storage),
+		auth.WithPepper([]byte("test_pepper")),
+	}
+	allOpts := append(defaultOpts, opts...)
+
+	a, err := auth.New(ctx, allOpts...)
 	if err != nil {
 		t.Fatalf("failed to initialise Auth: %v", err)
 	}
@@ -80,14 +96,42 @@ func preCleanDB(t *testing.T, ctx context.Context) {
 }
 
 /*
-setupRedis connects the given Auth instance to a test Redis server.
-If Redis is not reachable, it returns false, allowing the caller to t.Skip().
+withRedisOption returns a WithRedis option for testing.
+If Redis is not reachable, it should be handled in the test logic.
 */
-func setupRedis(t *testing.T, a *auth.Auth) bool {
+func withRedisOption(t *testing.T) auth.Option {
 	t.Helper()
-	err := a.RedisInit(testRedisHost, testRedisPass, 0)
-	if err != nil {
-		return false
-	}
-	return true
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     testRedisHost,
+		Password: testRedisPass,
+		DB:       0,
+	})
+	return auth.WithRedis(rdb)
+}
+
+func isRedisAvailable(t *testing.T) bool {
+	t.Helper()
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     testRedisHost,
+		Password: testRedisPass,
+		DB:       0,
+	})
+	defer rdb.Close()
+	return rdb.Ping(context.Background()).Err() == nil
+}
+
+func withJWTOption(t *testing.T, secret string, expiry time.Duration) auth.Option {
+	t.Helper()
+	return auth.WithJWT([]byte(secret), expiry)
+}
+
+/*
+computeTestOTPHash mirrors the library's HMAC-SHA256 keyed with the
+test pepper so that tests inserting OTPs directly into the database
+produce a hash that VerifyOTP can verify.
+*/
+func computeTestOTPHash(code string) string {
+	mac := hmac.New(sha256.New, []byte("test_pepper"))
+	mac.Write([]byte(code))
+	return hex.EncodeToString(mac.Sum(nil))
 }

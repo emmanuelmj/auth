@@ -8,6 +8,7 @@ var (
 	ErrInvalidToken            = errors.New("invalid jwt token")
 	ErrTokenExpired            = errors.New("jwt token expired")
 	ErrOTPExpired              = errors.New("otp expired")
+	ErrOTPNotFound             = errors.New("otp not found")
 	ErrInvalidOTP              = errors.New("invalid otp code")
 	ErrUserNotFound            = errors.New("user not found")
 	ErrInvalidCredentials      = errors.New("invalid credentials")

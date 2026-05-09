@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -17,35 +18,11 @@ type JWTClaims struct {
 }
 
 /*
-JWTInit sets the secret key and an optional expiration duration for JWTs.
-
-It should be called immediately after auth.Init(). If no expiry is provided (or if it is <= 0),
-the library uses the default 24-hour duration.
-Losing or changing this secret will invalidate all existing tokens.
-*/
-func (a *Auth) JWTInit(secret string, expiry ...time.Duration) error {
-	if secret == "" {
-		return ErrJWTSecretMissing
-	}
-	var effectiveExpiry time.Duration
-	if len(expiry) > 0 {
-		effectiveExpiry = expiry[0]
-	}
-	a.jwtOnce.Do(func() {
-		a.jwtSecret = []byte(secret)
-		if effectiveExpiry > 0 {
-			a.jwtExpiry = effectiveExpiry
-		}
-	})
-	return nil
-}
-
-/*
 GenerateToken creates a new, signed JWT for a given username.
 It supports an optional variadic expiryDuration for backward compatibility.
 If no duration is provided, it falls back to the configured a.jwtExpiry.
 */
-func (a *Auth) GenerateToken(username string, expiryDuration ...time.Duration) (string, error) {
+func (a *Auth) GenerateToken(ctx context.Context, username string, expiryDuration ...time.Duration) (string, error) {
 	if username == "" {
 		return "", ErrEmptyInput
 	}
@@ -89,7 +66,7 @@ and returns the JWTClaims if the token is valid.
 It is recommended to use users.go->LoginJWT() instead, as this
 function may change.
 */
-func (a *Auth) ValidateToken(tokenString string) (*JWTClaims, error) {
+func (a *Auth) ValidateToken(ctx context.Context, tokenString string) (*JWTClaims, error) {
 	if len(a.jwtSecret) == 0 {
 		return nil, ErrNotInitialized
 	}

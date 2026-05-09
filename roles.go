@@ -1,35 +1,27 @@
 package auth
 
+import "context"
+
 /* CreateRole registers a new role in the system. */
-func (a *Auth) CreateRole(name string) error {
-	if a.Conn == nil {
+func (a *Auth) CreateRole(ctx context.Context, name string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 
-	_, err := a.Conn.Exec(a.ctx,
-		"INSERT INTO roles(role) VALUES ($1)",
-		name,
-	)
-
-	if err != nil {
+	if err := a.storage.InsertRole(ctx, name); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (a *Auth) DeleteRole(name string) error {
-	if a.Conn == nil {
+/* DeleteRole removes an existing role from the system. */
+func (a *Auth) DeleteRole(ctx context.Context, name string) error {
+	if a.storage == nil {
 		return ErrNotInitialized
 	}
 
-	_, err := a.Conn.Exec(
-		a.ctx,
-		"DELETE FROM roles WHERE role = $1",
-		name,
-	)
-
-	if err != nil {
+	if err := a.storage.DeleteRole(ctx, name); err != nil {
 		return err
 	}
 

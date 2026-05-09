@@ -22,15 +22,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.0'
-          cache: true
+          go-version: '1.26.x'
+          cache: false
 
-      - name: Setup MSYS2 (Windows)
+      # ── C++ compiler ──────────────────────────────────────────────────────
+      # Linux/macOS: g++ is pre-installed on the runner image.
+      # Windows: MSYS2 is pre-installed on windows-latest at C:\msys64\.
+      #          We add the mingw64 bin directory to PATH — no network download.
+      - name: Configure MinGW PATH (Windows)
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          install: mingw-w64-x86_64-gcc
+        shell: pwsh
+        run: |
+          # MSYS2 ships with mingw-w64 g++ pre-installed on windows-latest runners.
+          # Just expose the bin directory — zero downloads, instant.
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build SMTP Mock (Linux / macOS)
         if: runner.os != 'Windows'
@@ -40,11 +45,12 @@ jobs:
 
       - name: Build SMTP Mock (Windows)
         if: runner.os == 'Windows'
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          mkdir -p bin
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
           g++ cpp/smtp_mock.cpp -static -o bin/smtp_mock.exe
 
+      # ── Quality gates ──────────────────────────────────────────────────────
       - name: Verify go.mod tidy
         run: |
           go mod tidy
@@ -66,6 +72,7 @@ jobs:
       - name: Run Short Tests
         run: go test -short ./...
 
+      # ── Database setup ─────────────────────────────────────────────────────
       - name: Setup PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -79,20 +86,67 @@ jobs:
         run: |
           brew install postgresql@14
           brew services start postgresql@14
-          sleep 5
+          for i in $(seq 1 15); do
+            $(brew --prefix postgresql@14)/bin/pg_isready -q && break
+            sleep 2
+          done
           $(brew --prefix postgresql@14)/bin/createuser -s postgres || true
           $(brew --prefix postgresql@14)/bin/psql -U postgres -c "CREATE USER testuser WITH PASSWORD 'testpass';"
           $(brew --prefix postgresql@14)/bin/psql -U postgres -c "CREATE DATABASE testauth OWNER testuser;"
           $(brew --prefix postgresql@14)/bin/psql -U postgres -c "ALTER USER testuser CREATEDB;"
 
-      - name: Setup Redis
+      - name: Setup PostgreSQL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Locate the pre-installed PostgreSQL binaries (version-agnostic).
+          # The runner has binaries installed but no initialised data directory.
+          $pgDir = Get-ChildItem "C:\Program Files\PostgreSQL" -Directory |
+                   Sort-Object Name -Descending | Select-Object -First 1
+          $pgBin  = "$($pgDir.FullName)\bin"
+          $pgData = "C:\pgdata"   # fresh directory we fully control
+
+          # Expose binaries to all subsequent steps
+          "$pgBin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:Path += ";$pgBin"
+
+          # Initialise a brand-new cluster with trust auth — no password needed,
+          # works for every PostgreSQL version the runner image ships.
+          & "$pgBin\initdb" -D $pgData -U postgres --auth=trust -E UTF8 --locale=C
+          if ($LASTEXITCODE -ne 0) { Write-Error "initdb failed"; exit 1 }
+
+          # Start the server directly (no service manipulation required)
+          & "$pgBin\pg_ctl" start -D $pgData -w -t 30
+          if ($LASTEXITCODE -ne 0) { Write-Error "pg_ctl start failed"; exit 1 }
+
+          # Bootstrap test credentials
+          & "$pgBin\psql" -U postgres -d postgres -c "CREATE USER testuser WITH PASSWORD 'testpass';"
+          & "$pgBin\psql" -U postgres -d postgres -c "CREATE DATABASE testauth OWNER testuser;"
+          & "$pgBin\psql" -U postgres -d postgres -c "ALTER USER testuser CREATEDB;"
+
+          Write-Host "PostgreSQL $($pgDir.Name) ready — testauth/testuser configured"
+
+      # ── Cache setup ────────────────────────────────────────────────────────
+      - name: Setup Redis (Linux / macOS)
         if: runner.os != 'Windows'
         uses: shogo82148/actions-setup-redis@v1
         with:
           redis-version: '7'
 
-      - name: Run Integration Tests
-        # /* Needswork */ - currently skipping on windows runner due to redis setup issues
+      - name: Setup Redis (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip `
+            -OutFile redis.zip
+          Expand-Archive redis.zip -DestinationPath C:\Redis
+          C:\Redis\redis-server.exe --service-install
+          C:\Redis\redis-server.exe --service-start
+          Start-Sleep -Seconds 3
+
+      # ── Integration tests ──────────────────────────────────────────────────
+      - name: Run Integration Tests (Linux / macOS)
         if: runner.os != 'Windows'
         env:
           TEST_DB_USER: testuser
@@ -101,3 +155,14 @@ jobs:
           TEST_DB_HOST: 127.0.0.1
           TEST_DB_PORT: 5432
         run: go test -v -race ./...
+
+      - name: Run Integration Tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TEST_DB_USER: testuser
+          TEST_DB_PASS: testpass
+          TEST_DB_NAME: testauth
+          TEST_DB_HOST: 127.0.0.1
+          TEST_DB_PORT: 5432
+        # -race requires CGO which is unreliable on windows-latest runners.
+        run: go test -v ./...

@@ -21,7 +21,7 @@ Auth. Works with Postgres. Supports multiple auth methods (Password, JWT, OTP), 
 All Pull Requests should be sent directly to this repository (**[emmanuelmj/auth](https://github.com/emmanuelmj/auth)**), not the main `GCETOSF` org repo.
 
 Please follow these guidelines:
-1. **Fork & PR:** Fork, branch, and open your Pull Request against the `main` branch here.
+1. **Fork & PR:** Fork, branch, and open your Pull Request against the `main` branch at [emmanuelmj/auth](https://github.com/emmanuelmj/auth).
 2. **Commit Standard:** Commits should follow conventional formats, e.g., `type(scope): description`.
 3. **Testing:** All changes must pass tests. Run `go test ./...` before submitting your PR.
 4. **Context:** If your PR addresses specific issues or features, ensure you provide properly formatted test data and look at existing implementations for reference.

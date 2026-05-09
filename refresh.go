@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -31,39 +32,19 @@ type RefreshTokenConfig struct {
 }
 
 /*
-RefreshTokenInit configures the refresh token settings on the Auth instance.
-If tokenLength <= 0, it defaults to 32 bytes.
-This must be called after Init() to use refresh token features.
-*/
-func (a *Auth) RefreshTokenInit(cfg RefreshTokenConfig) error {
-	if cfg.Expiry <= 0 {
-		return fmt.Errorf("%w: refresh token expiry must be positive", ErrInvalidInput)
-	}
-
-	if cfg.TokenLength <= 0 {
-		cfg.TokenLength = 32
-	}
-
-	a.refreshTokenExpiry = cfg.Expiry
-	a.refreshTokenLength = cfg.TokenLength
-
-	return nil
-}
-
-/*
 GenerateRefreshToken creates a new opaque refresh token for the given user,
 stores it in the database, and returns the token string.
 The caller should return this to the client alongside the JWT access token.
 */
-func (a *Auth) GenerateRefreshToken(userID string) (string, error) {
+func (a *Auth) GenerateRefreshToken(ctx context.Context, userID string) (string, error) {
 	if userID == "" {
 		return "", ErrEmptyInput
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return "", ErrDatabaseUnavailable
 	}
 	if a.refreshTokenExpiry <= 0 {
-		return "", fmt.Errorf("%w: refresh tokens not configured, call RefreshTokenInit first", ErrNotInitialized)
+		return "", fmt.Errorf("%w: refresh token expiry not configured, use WithRefreshToken()", ErrNotInitialized)
 	}
 
 	/* Generate a cryptographically secure random token */
@@ -75,21 +56,17 @@ func (a *Auth) GenerateRefreshToken(userID string) (string, error) {
 
 	expiresAt := time.Now().Add(a.refreshTokenExpiry)
 
-	query := `
-		INSERT INTO refresh_tokens (token, user_id, expires_at, revoked, created_at)
-		VALUES ($1, $2, $3, false, NOW())
-	`
-	_, err := a.Conn.Exec(a.ctx, query, token, userID, expiresAt)
+	err := a.storage.InsertRefreshToken(ctx, token, userID, expiresAt)
 	if err != nil {
 		return "", fmt.Errorf("%w: failed to store refresh token: %v", ErrDatabaseUnavailable, err)
 	}
 
 	if a.redisClient != nil {
 		pipe := a.redisClient.Pipeline()
-		pipe.Set(a.ctx, "refresh:"+token, userID, a.refreshTokenExpiry)
-		pipe.SAdd(a.ctx, "user_tokens:"+userID, token)
-		pipe.Expire(a.ctx, "user_tokens:"+userID, a.refreshTokenExpiry)
-		_, _ = pipe.Exec(a.ctx)
+		pipe.Set(ctx, "refresh:"+token, userID, a.refreshTokenExpiry)
+		pipe.SAdd(ctx, "user_tokens:"+userID, token)
+		pipe.Expire(ctx, "user_tokens:"+userID, a.refreshTokenExpiry)
+		_, _ = pipe.Exec(ctx)
 	}
 
 	return token, nil
@@ -99,28 +76,25 @@ func (a *Auth) GenerateRefreshToken(userID string) (string, error) {
 ValidateRefreshToken checks if a refresh token is valid (exists, not revoked, not expired).
 If valid, it returns the associated user ID.
 */
-func (a *Auth) ValidateRefreshToken(token string) (string, error) {
+func (a *Auth) ValidateRefreshToken(ctx context.Context, token string) (string, error) {
 	if token == "" {
 		return "", ErrEmptyInput
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return "", ErrDatabaseUnavailable
 	}
 
 	if a.redisClient != nil {
-		cachedUser, err := a.redisClient.Get(a.ctx, "refresh:"+token).Result()
+		cachedUser, err := a.redisClient.Get(ctx, "refresh:"+token).Result()
 		if err == nil {
 			return cachedUser, nil
 		}
 	}
 
-	val, err, _ := a.requestGroup.Do("validate_refresh:"+token, func() (interface{}, error) {
-		var userID string
-		var expiresAt time.Time
-		var revoked bool
-
-		query := "SELECT user_id, expires_at, revoked FROM refresh_tokens WHERE token = $1"
-		err := a.Conn.QueryRow(a.ctx, query, token).Scan(&userID, &expiresAt, &revoked)
+	ch := a.requestGroup.DoChan("validate_refresh:"+token, func() (interface{}, error) {
+		/* Use a detached context so no single caller's cancellation aborts the shared DB flight. */
+		dbCtx := context.WithoutCancel(ctx)
+		userID, expiresAt, revoked, err := a.storage.GetRefreshToken(dbCtx, token)
 		if err != nil {
 			return "", ErrRefreshTokenInvalid
 		}
@@ -137,21 +111,25 @@ func (a *Auth) ValidateRefreshToken(token string) (string, error) {
 			ttl := time.Until(expiresAt)
 			if ttl > 0 {
 				pipe := a.redisClient.Pipeline()
-				pipe.Set(a.ctx, "refresh:"+token, userID, ttl)
-				pipe.SAdd(a.ctx, "user_tokens:"+userID, token)
-				pipe.Expire(a.ctx, "user_tokens:"+userID, a.refreshTokenExpiry)
-				_, _ = pipe.Exec(a.ctx)
+				pipe.Set(dbCtx, "refresh:"+token, userID, ttl)
+				pipe.SAdd(dbCtx, "user_tokens:"+userID, token)
+				pipe.Expire(dbCtx, "user_tokens:"+userID, a.refreshTokenExpiry)
+				_, _ = pipe.Exec(dbCtx)
 			}
 		}
 
 		return userID, nil
 	})
 
-	if err != nil {
-		return "", err
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Val.(string), nil
 	}
-
-	return val.(string), nil
 }
 
 /*
@@ -161,20 +139,20 @@ limits the damage if a token is leaked.
 
 Returns the new token and the associated user ID.
 */
-func (a *Auth) RotateRefreshToken(oldToken string) (newToken string, userID string, err error) {
+func (a *Auth) RotateRefreshToken(ctx context.Context, oldToken string) (newToken string, userID string, err error) {
 	/* Validate the existing token first */
-	userID, err = a.ValidateRefreshToken(oldToken)
+	userID, err = a.ValidateRefreshToken(ctx, oldToken)
 	if err != nil {
 		return "", "", err
 	}
 
 	/* Revoke the old token */
-	if err := a.RevokeRefreshToken(oldToken); err != nil {
+	if err := a.RevokeRefreshToken(ctx, oldToken); err != nil {
 		return "", "", fmt.Errorf("failed to revoke old token: %w", err)
 	}
 
 	/* Issue a new one */
-	newToken, err = a.GenerateRefreshToken(userID)
+	newToken, err = a.GenerateRefreshToken(ctx, userID)
 	if err != nil {
 		return "", "", err
 	}
@@ -186,27 +164,23 @@ func (a *Auth) RotateRefreshToken(oldToken string) (newToken string, userID stri
 RevokeRefreshToken marks a specific refresh token as revoked.
 The token will no longer pass validation.
 */
-func (a *Auth) RevokeRefreshToken(token string) error {
+func (a *Auth) RevokeRefreshToken(ctx context.Context, token string) error {
 	if token == "" {
 		return ErrEmptyInput
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
-	cmdTag, err := a.Conn.Exec(a.ctx,
-		"UPDATE refresh_tokens SET revoked = true WHERE token = $1",
-		token,
-	)
-	if err != nil {
+	if err := a.storage.RevokeRefreshToken(ctx, token); err != nil {
+		if err == ErrRefreshTokenInvalid {
+			return ErrRefreshTokenInvalid
+		}
 		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
-	}
-	if cmdTag.RowsAffected() == 0 {
-		return ErrRefreshTokenInvalid
 	}
 
 	if a.redisClient != nil {
-		a.redisClient.Del(a.ctx, "refresh:"+token)
+		a.redisClient.Del(ctx, "refresh:"+token)
 	}
 
 	return nil
@@ -216,34 +190,32 @@ func (a *Auth) RevokeRefreshToken(token string) error {
 RevokeAllUserRefreshTokens revokes every refresh token for a given user.
 Use this when a user changes their password or you detect suspicious activity.
 */
-func (a *Auth) RevokeAllUserRefreshTokens(userID string) error {
+func (a *Auth) RevokeAllUserRefreshTokens(ctx context.Context, userID string) error {
 	if userID == "" {
 		return ErrEmptyInput
 	}
-	if a.Conn == nil {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
+	/* DB is the source of truth: revoke there first. */
+	if err := a.storage.RevokeAllUserRefreshTokens(ctx, userID); err != nil {
+		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
+	}
+
+	/* Only invalidate the cache after a successful DB write. */
 	if a.redisClient != nil {
-		tokens, err := a.redisClient.SMembers(a.ctx, "user_tokens:"+userID).Result()
+		tokens, err := a.redisClient.SMembers(ctx, "user_tokens:"+userID).Result()
 		if err == nil && len(tokens) > 0 {
 			keys := make([]string, len(tokens))
 			for i, t := range tokens {
 				keys[i] = "refresh:" + t
 			}
 			pipe := a.redisClient.Pipeline()
-			pipe.Del(a.ctx, keys...)
-			pipe.Del(a.ctx, "user_tokens:"+userID)
-			_, _ = pipe.Exec(a.ctx)
+			pipe.Del(ctx, keys...)
+			pipe.Del(ctx, "user_tokens:"+userID)
+			_, _ = pipe.Exec(ctx)
 		}
-	}
-
-	_, err := a.Conn.Exec(a.ctx,
-		"UPDATE refresh_tokens SET revoked = true WHERE user_id = $1",
-		userID,
-	)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
 	}
 
 	return nil
@@ -253,15 +225,12 @@ func (a *Auth) RevokeAllUserRefreshTokens(userID string) error {
 CleanupExpiredRefreshTokens removes expired refresh tokens from the database.
 This is called periodically by the background cleanup routine.
 */
-func (a *Auth) CleanupExpiredRefreshTokens() error {
-	if a.Conn == nil {
+func (a *Auth) CleanupExpiredRefreshTokens(ctx context.Context) error {
+	if a.storage == nil {
 		return ErrDatabaseUnavailable
 	}
 
-	_, err := a.Conn.Exec(a.ctx,
-		"DELETE FROM refresh_tokens WHERE expires_at < NOW()",
-	)
-	if err != nil {
+	if err := a.storage.CleanupExpiredRefreshTokens(ctx); err != nil {
 		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
 	}
 

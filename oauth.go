@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 type googleUser struct {
@@ -18,33 +15,9 @@ type googleUser struct {
 }
 
 /*
-OAuthInit initializes the Google OAuth configuration.
-It uses sync.Once to safely set the configuration once for this Auth instance.
-*/
-func (a *Auth) OAuthInit(clientID, clientSecret, redirectURL string) error {
-	if clientID == "" || clientSecret == "" || redirectURL == "" {
-		return ErrEmptyInput
-	}
-
-	a.oauthOnce.Do(func() {
-		a.oauthConfig = &oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			RedirectURL:  redirectURL,
-			Scopes: []string{
-				"https://www.googleapis.com/auth/userinfo.email",
-				"https://www.googleapis.com/auth/userinfo.profile",
-			},
-			Endpoint: google.Endpoint,
-		}
-	})
-	return nil
-}
-
-/*
 GetGoogleLoginURL generates the URL to the Google consent screen.
 */
-func (a *Auth) GetGoogleLoginURL(state string) (string, error) {
+func (a *Auth) GetGoogleLoginURL(ctx context.Context, state string) (string, error) {
 	if state == "" {
 		return "", ErrEmptyInput
 	}
@@ -95,7 +68,7 @@ func (a *Auth) HandleGoogleCallback(ctx context.Context, code string) (string, e
 		return "", err
 	}
 
-	jwtStr, err := a.GenerateToken(user.Email)
+	jwtStr, err := a.GenerateToken(ctx, user.Email)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate jwt after oauth login: %w", err)
 	}
