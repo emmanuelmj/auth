@@ -70,7 +70,7 @@ func WithRedis(client *redis.Client) Option {
 			return ErrEmptyInput
 		}
 		a.redisClient = client
-		
+
 		// Attempt to load the rate limit script
 		const rateLimitScript = `
 local window = tonumber(ARGV[1])
@@ -212,7 +212,7 @@ func WithPasswordPolicy(policy PasswordPolicy) Option {
 /* Let's just create a New(ctx, opts...) and see. */
 func New(ctx context.Context, opts ...Option) (*Auth, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	
+
 	a := &Auth{
 		argonParams:        globalDefaultArgon,
 		jwtExpiry:          24 * time.Hour,
@@ -240,6 +240,11 @@ func New(ctx context.Context, opts ...Option) (*Auth, error) {
 			cancel()
 			return nil, fmt.Errorf("failed to check tables: %w", err)
 		}
+	}
+
+	/* Start background OTP cleanup if storage and OTP are configured. */
+	if a.storage != nil && a.otpLength > 0 {
+		a.startOTPCleanup()
 	}
 
 	return a, nil

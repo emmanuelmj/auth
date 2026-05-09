@@ -218,7 +218,9 @@ func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) error {
 
 	res, err := rl.client.EvalSha(ctx, rl.scriptSHA, []string{"ratelimit:" + key}, windowMs, rl.config.MaxRequests, nowMs, member).Result()
 	if err != nil {
-		return ErrRateLimitBackendDown
+		/* Fail-closed policy: Redis unavailability must not open the door to brute-force attacks. */
+		/* Callers needing fail-open must explicitly catch ErrRateLimitExceeded and inspect context. */
+		return ErrRateLimitExceeded
 	}
 
 	if allowed, ok := res.(int64); ok && allowed == 1 {

@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/url"
 	"time"
 
@@ -78,7 +77,6 @@ func NewPostgresStorage(ctx context.Context, port uint16, dbUser, dbPass, dbName
 		return nil, fmt.Errorf("failed to connect to postgres: %w", err)
 	}
 
-	log.Println("DB connection pool established")
 	return &PostgresStorage{pool: pool}, nil
 }
 

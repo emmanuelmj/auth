@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
-	"log"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -22,7 +21,7 @@ Recommended default values
 var globalDefaultArgon = ArgonParameters{
 	Time:    3,
 	Memory:  64 * 1024,
-	Threads: 4,
+	Threads: 1,
 	KeyLen:  32,
 }
 
@@ -37,8 +36,8 @@ func (a *Auth) DefaultSaltParameters(time uint32, memory uint32, threads uint8, 
 	if time == 0 {
 		return fmt.Errorf("%w: time (iterations) cannot be zero", ErrInvalidInput)
 	}
-	if memory < 8*1024 {
-		return fmt.Errorf("%w: memory too low: must be at least 8MB", ErrInvalidInput)
+	if memory < 32*1024 {
+		return fmt.Errorf("%w: memory too low: must be at least 32MB", ErrInvalidInput)
 	}
 	if threads == 0 {
 		return fmt.Errorf("%w: threads cannot be zero", ErrInvalidInput)
@@ -55,8 +54,6 @@ func (a *Auth) DefaultSaltParameters(time uint32, memory uint32, threads uint8, 
 	return nil
 }
 
-
-
 /*
 Although the library holds a lot of control of the functions we are making public.
 It does make sense to make a hashing function ΓÇö specifically something that takes a
@@ -64,23 +61,25 @@ string and returns an argon2 string public. This is a basic functionality any li
 
 This returns the hashes string and the generated salt.
 */
-func (a *Auth) HashPassword(password, salt string) string {
+func (a *Auth) HashPassword(password, salt string) (string, error) {
 	passwordBytes := []byte(password)
 	if len(a.pepper) > 0 {
 		passwordBytes = append(passwordBytes, a.pepper...)
 	}
 	saltBytes := []byte(salt)
 	if len(saltBytes) < 16 {
-		log.Printf("Warning: salt length is unusually short (%d bytes). Recommended >= 16 bytes.", len(saltBytes))
+		return "", fmt.Errorf("%w: salt too short (%d bytes, minimum 16)", ErrInvalidInput, len(saltBytes))
 	}
 
 	hash := argon2.IDKey(passwordBytes, saltBytes, a.argonParams.Time, a.argonParams.Memory, a.argonParams.Threads, a.argonParams.KeyLen)
 
-	return hex.EncodeToString(hash)
+	return hex.EncodeToString(hash), nil
 }
 
 func (a *Auth) comparePasswords(password, salt, storedHash string) bool {
-	newHash := a.HashPassword(password, salt)
-
+	newHash, err := a.HashPassword(password, salt)
+	if err != nil {
+		return false
+	}
 	return subtle.ConstantTimeCompare([]byte(newHash), []byte(storedHash)) == 1
 }

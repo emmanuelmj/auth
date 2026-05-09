@@ -14,8 +14,14 @@ the same salt produces a consistent output.
 func TestHashPasswordDeterministic(t *testing.T) {
 	a, _ := auth.New(context.Background())
 
-	hash1 := a.HashPassword("mypassword", "somesalt1234567890")
-	hash2 := a.HashPassword("mypassword", "somesalt1234567890")
+	hash1, err := a.HashPassword("mypassword", "somesalt1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	hash2, err := a.HashPassword("mypassword", "somesalt1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if hash1 != hash2 {
 		t.Errorf("same password and salt should produce the same hash, got %s and %s", hash1, hash2)
@@ -28,8 +34,14 @@ TestHashPasswordDifferentSalt verifies that different salts produce different ha
 func TestHashPasswordDifferentSalt(t *testing.T) {
 	a, _ := auth.New(context.Background())
 
-	hash1 := a.HashPassword("mypassword", "salt_one_1234567890")
-	hash2 := a.HashPassword("mypassword", "salt_two_1234567890")
+	hash1, err := a.HashPassword("mypassword", "salt_one_1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	hash2, err := a.HashPassword("mypassword", "salt_two_1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("different salts should produce different hashes")
@@ -42,8 +54,14 @@ TestHashPasswordDifferentPasswords verifies that different passwords produce dif
 func TestHashPasswordDifferentPasswords(t *testing.T) {
 	a, _ := auth.New(context.Background())
 
-	hash1 := a.HashPassword("password1", "same_salt_1234567890")
-	hash2 := a.HashPassword("password2", "same_salt_1234567890")
+	hash1, err := a.HashPassword("password1", "same_salt_1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	hash2, err := a.HashPassword("password2", "same_salt_1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("different passwords should produce different hashes")
@@ -56,10 +74,16 @@ TestHashPasswordWithPepper verifies that adding a pepper changes the hash output
 func TestHashPasswordWithPepper(t *testing.T) {
 	a, _ := auth.New(context.Background())
 
-	hashWithout := a.HashPassword("mypassword", "somesalt1234567890")
+	hashWithout, err := a.HashPassword("mypassword", "somesalt1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	b, _ := auth.New(context.Background(), auth.WithPepper([]byte("my-secret-pepper")))
-	hashWith := b.HashPassword("mypassword", "somesalt1234567890")
+	hashWith, err := b.HashPassword("mypassword", "somesalt1234567890")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if hashWithout == hashWith {
 		t.Error("pepper should change the hash output")
@@ -75,8 +99,9 @@ func TestDefaultSaltParameters(t *testing.T) {
 	if err := a.DefaultSaltParameters(0, 64*1024, 4, 32); err == nil {
 		t.Error("expected error for time=0")
 	}
-	if err := a.DefaultSaltParameters(3, 1024, 4, 32); err == nil {
-		t.Error("expected error for memory below 8MB")
+	/* Memory floor is now 32MB; 16MB (16*1024 KB) should trigger the guard. */
+	if err := a.DefaultSaltParameters(3, 16*1024, 4, 32); err == nil {
+		t.Error("expected error for memory below 32MB")
 	}
 	if err := a.DefaultSaltParameters(3, 64*1024, 0, 32); err == nil {
 		t.Error("expected error for threads=0")
