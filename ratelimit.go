@@ -184,9 +184,12 @@ RedisRateLimiter implements a Redis-backed sliding-window rate limiter.
 It relies on a pre-loaded Lua script managed by the Auth instance.
 */
 type RedisRateLimiter struct {
-	client    *redis.Client
-	config    RateLimiterConfig
-	scriptSHA string
+	client        *redis.Client
+	config        RateLimiterConfig
+	scriptSHA     string
+	fallback      *RateLimiter
+	fallbackMu    sync.RWMutex
+	usingFallback bool
 }
 
 /*
@@ -197,15 +200,23 @@ func (a *Auth) NewRedisRateLimiter(cfg RateLimiterConfig) (*RedisRateLimiter, er
 	if cfg.MaxRequests <= 0 || cfg.Window <= 0 {
 		return nil, ErrInvalidInput
 	}
-	if a.redisClient == nil || a.rateLimitSHA == "" {
-		return nil, ErrRedisUnavailable
+
+	fallback, err := NewRateLimiter(cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	return &RedisRateLimiter{
-		client:    a.redisClient,
-		config:    cfg,
-		scriptSHA: a.rateLimitSHA,
-	}, nil
+	rl := &RedisRateLimiter{
+		config:   cfg,
+		fallback: fallback,
+	}
+
+	if a != nil {
+		rl.client = a.redisClient
+		rl.scriptSHA = a.rateLimitSHA
+	}
+
+	return rl, nil
 }
 
 func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) error {
@@ -213,38 +224,81 @@ func (rl *RedisRateLimiter) Allow(ctx context.Context, key string) error {
 		return ErrEmptyInput
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	rl.fallbackMu.RLock()
+	if rl.usingFallback || rl.client == nil || rl.scriptSHA == "" {
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Allow(ctx, key)
+	}
+
 	now := time.Now()
 	windowMs := rl.config.Window.Milliseconds()
 	nowMs := now.UnixMilli()
 
-	/* Generate a cryptographically random unique member.
-	   Using time.UnixNano() is not safe on Windows where the timer resolution
-	   is ~15.6 ms — two rapid calls can return the same nanosecond value,
-	   causing ZADD to overwrite the existing member instead of inserting a new
-	   one, silently under-counting requests and breaking the rate limit. */
 	var raw [8]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		/* Fail-closed: if we cannot generate a unique member we must deny. */
+		rl.fallbackMu.RUnlock()
 		return ErrRateLimitExceeded
 	}
+
 	member := hex.EncodeToString(raw[:])
 
-	res, err := rl.client.EvalSha(ctx, rl.scriptSHA, []string{"ratelimit:" + key}, windowMs, rl.config.MaxRequests, nowMs, member).Result()
+	res, err := rl.client.EvalSha(
+		ctx,
+		rl.scriptSHA,
+		[]string{"ratelimit:" + key},
+		windowMs,
+		rl.config.MaxRequests,
+		nowMs,
+		member,
+	).Result()
+
 	if err != nil {
-		/* Fail-closed policy: Redis unavailability must not open the door to brute-force attacks. */
-		/* Callers needing fail-open must explicitly catch ErrRateLimitExceeded and inspect context. */
-		return ErrRateLimitExceeded
+		if ctx.Err() != nil {
+			rl.fallbackMu.RUnlock()
+			return ctx.Err()
+		}
+
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Allow(ctx, key)
 	}
 
+	rl.fallbackMu.RUnlock()
 	if allowed, ok := res.(int64); ok && allowed == 1 {
 		return nil
 	}
+
 	return ErrRateLimitExceeded
 }
 
 func (rl *RedisRateLimiter) Remaining(ctx context.Context, key string) (int, error) {
 	if key == "" {
 		return 0, ErrEmptyInput
+	}
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	rl.fallbackMu.RLock()
+	if rl.usingFallback || rl.client == nil || rl.scriptSHA == "" {
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Remaining(ctx, key)
 	}
 
 	now := time.Now()
@@ -254,15 +308,29 @@ func (rl *RedisRateLimiter) Remaining(ctx context.Context, key string) (int, err
 	pipe.ZRemRangeByScore(ctx, "ratelimit:"+key, "0", fmt.Sprintf("%d", cutoffMs))
 	countCmd := pipe.ZCard(ctx, "ratelimit:"+key)
 	_, err := pipe.Exec(ctx)
+
 	if err != nil {
-		return 0, ErrRateLimitBackendDown
+		if ctx.Err() != nil {
+			rl.fallbackMu.RUnlock()
+			return 0, ctx.Err()
+		}
+
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Remaining(ctx, key)
 	}
 
+	rl.fallbackMu.RUnlock()
 	count := countCmd.Val()
 	remaining := rl.config.MaxRequests - int(count)
+
 	if remaining < 0 {
 		return 0, nil
 	}
+
 	return remaining, nil
 }
 
@@ -270,9 +338,47 @@ func (rl *RedisRateLimiter) Reset(ctx context.Context, key string) error {
 	if key == "" {
 		return ErrEmptyInput
 	}
-	err := rl.client.Del(ctx, "ratelimit:"+key).Err()
-	if err != nil {
-		return ErrRateLimitBackendDown
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+
+	rl.fallbackMu.RLock()
+	if rl.usingFallback || rl.client == nil || rl.scriptSHA == "" {
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Reset(ctx, key)
+	}
+
+	err := rl.client.Del(ctx, "ratelimit:"+key).Err()
+
+	if err != nil {
+		if ctx.Err() != nil {
+			rl.fallbackMu.RUnlock()
+			return ctx.Err()
+		}
+
+		rl.fallbackMu.RUnlock()
+		rl.fallbackMu.Lock()
+		rl.usingFallback = true
+		rl.fallbackMu.Unlock()
+
+		return rl.fallback.Reset(ctx, key)
+	}
+
+	rl.fallbackMu.RUnlock()
 	return nil
+}
+
+/*
+Stop shuts down the in-memory fallback cleanup goroutine.
+Call this when the RedisRateLimiter is no longer needed.
+*/
+func (rl *RedisRateLimiter) Stop() {
+	if rl != nil && rl.fallback != nil {
+		rl.fallback.Stop()
+	}
 }

@@ -67,10 +67,13 @@ func TestNewRateLimiterInvalidConfig(t *testing.T) {
 TestRateLimiterAllow checks that requests within the limit are allowed.
 */
 func TestRateLimiterAllow(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 3,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	for i := 0; i < 3; i++ {
@@ -84,17 +87,20 @@ func TestRateLimiterAllow(t *testing.T) {
 TestRateLimiterExceeded checks that exceeding the limit returns an error.
 */
 func TestRateLimiterExceeded(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 3,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	for i := 0; i < 3; i++ {
 		_ = rl.Allow(context.Background(), "user1")
 	}
 
-	err := rl.Allow(context.Background(), "user1")
+	err = rl.Allow(context.Background(), "user1")
 	if err == nil {
 		t.Error("expected rate limit exceeded error")
 	}
@@ -104,10 +110,13 @@ func TestRateLimiterExceeded(t *testing.T) {
 TestRateLimiterEmptyKey checks that empty keys are rejected.
 */
 func TestRateLimiterEmptyKey(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 5,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	if err := rl.Allow(context.Background(), ""); err == nil {
@@ -119,10 +128,13 @@ func TestRateLimiterEmptyKey(t *testing.T) {
 TestRateLimiterIsolation checks that different keys have independent limits.
 */
 func TestRateLimiterIsolation(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	_ = rl.Allow(context.Background(), "user1")
@@ -137,10 +149,13 @@ func TestRateLimiterIsolation(t *testing.T) {
 TestRateLimiterWindowExpiry verifies that old timestamps expire and free up capacity.
 */
 func TestRateLimiterWindowExpiry(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      50 * time.Millisecond,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	_ = rl.Allow(context.Background(), "user1")
@@ -161,10 +176,13 @@ func TestRateLimiterWindowExpiry(t *testing.T) {
 TestRateLimiterRemaining checks the remaining count logic.
 */
 func TestRateLimiterRemaining(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 5,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	if r, _ := rl.Remaining(context.Background(), "user1"); r != 5 {
@@ -183,10 +201,13 @@ func TestRateLimiterRemaining(t *testing.T) {
 TestRateLimiterReset verifies that resetting a key clears its history.
 */
 func TestRateLimiterReset(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	_ = rl.Allow(context.Background(), "user1")
@@ -207,10 +228,13 @@ func TestRateLimiterReset(t *testing.T) {
 TestRateLimiterStop verifies that the stop function can be called multiple times safely.
 */
 func TestRateLimiterStop(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 5,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	rl.Stop()
 	rl.Stop()
@@ -221,13 +245,17 @@ TestRateLimiterConcurrent tests that the rate limiter is safe
 under concurrent access from multiple goroutines.
 */
 func TestRateLimiterConcurrent(t *testing.T) {
-	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{
+	rl, err := auth.NewRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 100,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rl.Stop()
 
 	done := make(chan struct{})
+
 	for i := 0; i < 50; i++ {
 		go func() {
 			for j := 0; j < 10; j++ {
@@ -250,18 +278,76 @@ func TestRateLimiterConcurrent(t *testing.T) {
 /* ======================== RedisRateLimiter Tests ======================== */
 
 func TestRedisRateLimiterInitFailure(t *testing.T) {
-	/* No storage or Redis — just need an Auth with no Redis configured. */
 	a, err := auth.New(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error creating Auth: %v", err)
 	}
 
-	_, err = a.NewRedisRateLimiter(auth.RateLimiterConfig{
-		MaxRequests: 5,
+	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+		MaxRequests: 2,
 		Window:      time.Minute,
 	})
-	if err == nil {
-		t.Error("expected error when Redis is not initialized on Auth")
+	if err != nil {
+		t.Fatalf("expected in-memory fallback, got error: %v", err)
+	}
+	defer rl.Stop()
+
+	if err := rl.Allow(context.Background(), "user1"); err != nil {
+		t.Fatalf("first request should be allowed: %v", err)
+	}
+
+	if err := rl.Allow(context.Background(), "user1"); err != nil {
+		t.Fatalf("second request should be allowed: %v", err)
+	}
+
+	if err := rl.Allow(context.Background(), "user1"); err != auth.ErrRateLimitExceeded {
+		t.Errorf("expected rate limit exceeded, got: %v", err)
+	}
+}
+
+func TestRedisRateLimiterFallbackRemainingReset(t *testing.T) {
+	a, err := auth.New(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+		MaxRequests: 2,
+		Window:      time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Stop()
+
+	ctx := context.Background()
+
+	if err := rl.Allow(ctx, "user1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rl.Allow(ctx, "user1"); err != nil {
+		t.Fatal(err)
+	}
+
+	remaining, err := rl.Remaining(ctx, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Errorf("expected 0 remaining, got %d", remaining)
+	}
+
+	if err := rl.Reset(ctx, "user1"); err != nil {
+		t.Fatal(err)
+	}
+
+	remaining, err = rl.Remaining(ctx, "user1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 2 {
+		t.Errorf("expected 2 remaining after reset, got %d", remaining)
 	}
 }
 
@@ -269,6 +355,7 @@ func TestRedisRateLimiterAllow(t *testing.T) {
 	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+
 	a := setupTestAuth(t, withRedisOption(t))
 
 	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
@@ -278,6 +365,8 @@ func TestRedisRateLimiterAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	defer rl.Stop()
+
 	rl.Reset(context.Background(), "user1")
 
 	for i := 0; i < 3; i++ {
@@ -295,12 +384,18 @@ func TestRedisRateLimiterRemaining(t *testing.T) {
 	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+
 	a := setupTestAuth(t, withRedisOption(t))
 
-	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 5,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Stop()
+
 	rl.Reset(context.Background(), "user1")
 
 	if r, _ := rl.Remaining(context.Background(), "user1"); r != 5 {
@@ -319,12 +414,18 @@ func TestRedisRateLimiterReset(t *testing.T) {
 	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+
 	a := setupTestAuth(t, withRedisOption(t))
 
-	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Stop()
+
 	rl.Reset(context.Background(), "user1")
 
 	_ = rl.Allow(context.Background(), "user1")
@@ -345,12 +446,18 @@ func TestRedisRateLimiterExpiry(t *testing.T) {
 	if !isRedisAvailable(t) {
 		t.Skip("Redis is not available")
 	}
+
 	a := setupTestAuth(t, withRedisOption(t))
 
-	rl, _ := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      50 * time.Millisecond,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Stop()
+
 	rl.Reset(context.Background(), "user1")
 
 	_ = rl.Allow(context.Background(), "user1")

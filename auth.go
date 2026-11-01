@@ -95,8 +95,10 @@ return 1
 
 		sha, err := client.ScriptLoad(ctx, rateLimitScript).Result()
 		if err != nil {
-			return fmt.Errorf("failed to load redis rate limit script: %w", err)
+			a.rateLimitSHA = ""
+			return nil
 		}
+
 		a.rateLimitSHA = sha
 		return nil
 	}
