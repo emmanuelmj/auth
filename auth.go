@@ -44,7 +44,6 @@ type Auth struct {
 	oauthConfig        *oauth2.Config
 	redisClient        *redis.Client
 	requestGroup       singleflight.Group
-	rateLimitSHA       string
 	passwordPolicy     PasswordPolicy
 }
 
@@ -62,44 +61,16 @@ func WithStorage(storage StorageEngine) Option {
 	}
 }
 
-/* WithRedis configures the Auth instance with a Redis client for caching and rate-limiting. */
+/*
+WithRedis configures the Auth instance with a Redis client for caching and
+rate-limiting. Redis connectivity is checked when a Redis operation is made.
+*/
 func WithRedis(client *redis.Client) Option {
 	return func(a *Auth) error {
 		if client == nil {
 			return ErrEmptyInput
 		}
 		a.redisClient = client
-
-		/* Attempt to load the rate limit script */
-		const rateLimitScript = `
-local window = tonumber(ARGV[1])
-local limit = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local member = ARGV[4]
-local clearBefore = now - window
-
-redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, clearBefore)
-local count = redis.call('ZCARD', KEYS[1])
-
-if count >= limit then
-    return 0
-end
-
-redis.call('ZADD', KEYS[1], now, member)
-redis.call('PEXPIRE', KEYS[1], window)
-return 1
-`
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		sha, err := client.ScriptLoad(ctx, rateLimitScript).Result()
-		if err != nil {
-			a.rateLimitSHA = ""
-			return nil
-		}
-
-		a.rateLimitSHA = sha
 		return nil
 	}
 }

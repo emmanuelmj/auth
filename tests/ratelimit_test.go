@@ -2,10 +2,13 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	auth "github.com/GCET-Open-Source-Foundation/auth"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 /*
@@ -283,71 +286,93 @@ func TestRedisRateLimiterInitFailure(t *testing.T) {
 		t.Fatalf("unexpected error creating Auth: %v", err)
 	}
 
-	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+	_, err = a.NewRedisRateLimiter(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      time.Minute,
 	})
-	if err != nil {
-		t.Fatalf("expected in-memory fallback, got error: %v", err)
-	}
-	defer rl.Stop()
-
-	if err := rl.Allow(context.Background(), "user1"); err != nil {
-		t.Fatalf("first request should be allowed: %v", err)
+	if !errors.Is(err, auth.ErrRedisUnavailable) {
+		t.Fatalf("expected ErrRedisUnavailable, got: %v", err)
 	}
 
-	if err := rl.Allow(context.Background(), "user1"); err != nil {
-		t.Fatalf("second request should be allowed: %v", err)
-	}
-
-	if err := rl.Allow(context.Background(), "user1"); err != auth.ErrRateLimitExceeded {
-		t.Errorf("expected rate limit exceeded, got: %v", err)
+	var nilAuth *auth.Auth
+	if _, err := nilAuth.NewRedisRateLimiter(auth.RateLimiterConfig{
+		MaxRequests: 2,
+		Window:      time.Minute,
+	}); !errors.Is(err, auth.ErrNotInitialized) {
+		t.Fatalf("expected ErrNotInitialized, got: %v", err)
 	}
 }
 
 func TestRedisRateLimiterFallbackRemainingReset(t *testing.T) {
-	a, err := auth.New(context.Background())
+	server, err := miniredis.Run()
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(server.Close)
 
-	rl, err := a.NewRedisRateLimiter(auth.RateLimiterConfig{
+	client := redis.NewClient(&redis.Options{
+		Addr:        server.Addr(),
+		MaxRetries:  -1,
+		DialTimeout: 100 * time.Millisecond,
+		ReadTimeout: 100 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+
+	a, err := auth.New(context.Background(), auth.WithRedis(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.Close)
+
+	const cooldown = 100 * time.Millisecond
+	rl, err := a.NewRedisRateLimiterWithOptions(auth.RateLimiterConfig{
 		MaxRequests: 2,
 		Window:      time.Minute,
-	})
+	}, auth.WithRateLimitFallback(cooldown))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rl.Stop()
 
 	ctx := context.Background()
+	if err := rl.Allow(ctx, "redis-before-outage"); err != nil {
+		t.Fatal(err)
+	}
+
+	redisAddr := server.Addr()
+	server.Close()
 
 	if err := rl.Allow(ctx, "user1"); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := rl.Allow(ctx, "user1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := rl.Allow(ctx, "user1"); !errors.Is(err, auth.ErrRateLimitExceeded) {
+		t.Fatalf("expected fallback limit to be enforced, got: %v", err)
+	}
 
+	if _, err := rl.Remaining(ctx, "user1"); !errors.Is(err, auth.ErrRateLimitBackendDown) {
+		t.Fatalf("expected Remaining to report backend outage, got: %v", err)
+	}
+	if err := rl.Reset(ctx, "user1"); !errors.Is(err, auth.ErrRateLimitBackendDown) {
+		t.Fatalf("expected Reset to report backend outage, got: %v", err)
+	}
+
+	time.Sleep(cooldown + 20*time.Millisecond)
+	if err := server.StartAddr(redisAddr); err != nil {
+		t.Fatalf("restart miniredis: %v", err)
+	}
+
+	if err := rl.Allow(ctx, "user1"); err != nil {
+		t.Fatalf("expected Redis to be used after recovery, got: %v", err)
+	}
 	remaining, err := rl.Remaining(ctx, "user1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if remaining != 0 {
-		t.Errorf("expected 0 remaining, got %d", remaining)
-	}
-
-	if err := rl.Reset(ctx, "user1"); err != nil {
-		t.Fatal(err)
-	}
-
-	remaining, err = rl.Remaining(ctx, "user1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if remaining != 2 {
-		t.Errorf("expected 2 remaining after reset, got %d", remaining)
+	if remaining != 1 {
+		t.Errorf("expected Redis remaining count of 1 after recovery, got %d", remaining)
 	}
 }
 
