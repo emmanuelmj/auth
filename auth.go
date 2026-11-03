@@ -36,6 +36,7 @@ type Auth struct {
 	jwtExpiry          time.Duration
 	otpExpiry          time.Duration
 	otpLength          int
+	otpPepper          []byte
 	emailSender        EmailSender
 	refreshTokenExpiry time.Duration
 	refreshTokenLength int
@@ -117,8 +118,13 @@ func WithRefreshToken(expiry time.Duration, length int) Option {
 	}
 }
 
-/* WithOTP configures the OTP length and expiration time. */
-func WithOTP(length int, expiry time.Duration) Option {
+/*
+ * WithOTP configures the OTP length, expiration time, and
+ * dedicated HMAC-SHA256 pepper. The pepper must contain
+ * at least 32 bytes and should be separate from the global
+ * authentication pepper.
+ */
+func WithOTP(length int, otpPepper []byte, expiry time.Duration) Option {
 	return func(a *Auth) error {
 		if length <= 0 {
 			length = 6
@@ -126,9 +132,13 @@ func WithOTP(length int, expiry time.Duration) Option {
 		if expiry <= 0 {
 			expiry = 5 * time.Minute
 		}
+		if len(otpPepper) < 32 {
+			return ErrInvalidInput
+		}
 		a.otpLength = length
 		a.otpExpiry = expiry
 		a.otpEnabled = true
+		a.otpPepper = append([]byte(nil), otpPepper...)
 		return nil
 	}
 }
@@ -276,7 +286,7 @@ func New(ctx context.Context, opts ...Option) (*Auth, error) {
 	}
 
 	/* Guard: pepper is mandatory when OTP is explicitly enabled. */
-	if a.otpEnabled && len(a.pepper) == 0 {
+	if a.otpEnabled && len(a.otpPepper) == 0 {
 		cancel()
 		return nil, errors.New("OTP requires a pepper: configure WithPepper before WithOTP")
 	}

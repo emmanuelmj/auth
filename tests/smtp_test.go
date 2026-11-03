@@ -83,7 +83,7 @@ func TestSMTPMockOTPDelivery(t *testing.T) {
 	skipIfShort(t)
 	binary := findMockBinary(t)
 	a := setupTestAuth(t,
-		auth.WithOTP(6, 5*time.Minute),
+		auth.WithOTP(6, []byte("0123456789abcdef0123456789abcdef"), 5*time.Minute),
 		auth.WithSMTP("127.0.0.1", "2525", "noreply@auth.test", "dummy_pass"),
 	)
 	db := getTestDBPool(t, context.Background())
@@ -268,7 +268,7 @@ func TestSMTPMockFullOTPFlow(t *testing.T) {
 	skipIfShort(t)
 	binary := findMockBinary(t)
 	a := setupTestAuth(t,
-		auth.WithOTP(6, 5*time.Minute),
+		auth.WithOTP(6, []byte("0123456789abcdef0123456789abcdef"), 5*time.Minute),
 		auth.WithSMTP("127.0.0.1", "2525", "noreply@auth.test", "dummy_pass"),
 	)
 	db := getTestDBPool(t, context.Background())
