@@ -44,6 +44,7 @@ type StorageEngine interface {
 	/* OTP */
 	InsertOTP(ctx context.Context, email, code string, expiresAt time.Time) error
 	GetOTP(ctx context.Context, email string) (code string, expiresAt time.Time, err error)
+	IncreaseOTPAttempts(ctx context.Context, email string) (int, error)
 	DeleteOTP(ctx context.Context, email string) error
 	ListActiveOTPs(ctx context.Context, limit, offset int) ([]string, error)
 	CleanupExpiredOTPs(ctx context.Context) error
@@ -106,33 +107,34 @@ func (p *PostgresStorage) Close() error {
 func (p *PostgresStorage) CheckTables(ctx context.Context) error {
 	query := `
 		CREATE TABLE IF NOT EXISTS spaces (
-			spaceName TEXT PRIMARY KEY, 
+			spaceName TEXT PRIMARY KEY,
 			authority INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS users (
-			user_id TEXT PRIMARY KEY, 
-			password_hash TEXT NOT NULL, 
+			user_id TEXT PRIMARY KEY,
+			password_hash TEXT NOT NULL,
 			salt TEXT NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS roles (
 			role TEXT PRIMARY KEY
 		);
 		CREATE TABLE IF NOT EXISTS permissions (
-			user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, 
-			spaceName TEXT NOT NULL REFERENCES spaces(spaceName) ON DELETE CASCADE, 
-			role TEXT NOT NULL REFERENCES roles(role) ON DELETE CASCADE, 
+			user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			spaceName TEXT NOT NULL REFERENCES spaces(spaceName) ON DELETE CASCADE,
+			role TEXT NOT NULL REFERENCES roles(role) ON DELETE CASCADE,
 			PRIMARY KEY (user_id, spaceName, role)
 		);
 		CREATE TABLE IF NOT EXISTS otps (
-			email TEXT PRIMARY KEY, 
-			code TEXT NOT NULL, 
-			expires_at TIMESTAMPTZ NOT NULL
+			email TEXT PRIMARY KEY,
+			code TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			attempts INT NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS refresh_tokens (
-			token TEXT PRIMARY KEY, 
-			user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, 
-			expires_at TIMESTAMPTZ NOT NULL, 
-			revoked BOOLEAN NOT NULL DEFAULT false, 
+			token TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			expires_at TIMESTAMPTZ NOT NULL,
+			revoked BOOLEAN NOT NULL DEFAULT false,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
 		);
 	`
@@ -293,7 +295,7 @@ func (p *PostgresStorage) DeletePermission(ctx context.Context, username, spaceN
 
 /* InsertOTP inserts or updates an OTP. The expiry is stored in UTC. */
 func (p *PostgresStorage) InsertOTP(ctx context.Context, email, code string, expiresAt time.Time) error {
-	_, err := p.pool.Exec(ctx, "INSERT INTO otps (email, code, expires_at) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, expires_at = EXCLUDED.expires_at", email, code, expiresAt.UTC())
+	_, err := p.pool.Exec(ctx, "INSERT INTO otps (email, code, expires_at) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, expires_at = EXCLUDED.expires_at, attempts = 0", email, code, expiresAt.UTC())
 	return err
 }
 
@@ -309,6 +311,23 @@ func (p *PostgresStorage) GetOTP(ctx context.Context, email string) (string, tim
 		return "", time.Time{}, err
 	}
 	return code, expiresAt.UTC(), nil
+}
+
+/* IncreaseOTPAttempts increases the attempts of OTPs entered for rate limiting*/
+func (p *PostgresStorage) IncreaseOTPAttempts(ctx context.Context, email string) (int, error) {
+	var newOTP int
+	attemptcheck := `
+			UPDATE otps
+			SET attempts = attempts + 1
+			WHERE email = $1
+			RETURNING attempts
+	`
+	err := p.pool.QueryRow(ctx, attemptcheck, email).Scan(&newOTP)
+
+	if err != nil {
+		return 0, err
+	}
+	return newOTP, nil
 }
 
 /* DeleteOTP deletes an OTP. */

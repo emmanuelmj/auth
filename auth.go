@@ -36,6 +36,7 @@ type Auth struct {
 	jwtExpiry          time.Duration
 	otpExpiry          time.Duration
 	otpLength          int
+	otpMaxAttempts     int
 	emailSender        EmailSender
 	refreshTokenExpiry time.Duration
 	refreshTokenLength int
@@ -129,6 +130,17 @@ func WithOTP(length int, expiry time.Duration) Option {
 		a.otpLength = length
 		a.otpExpiry = expiry
 		a.otpEnabled = true
+		return nil
+	}
+}
+
+/* WithOTPRate configures the max attempts for an OTP. */
+func WithOTPRate(maxAttempts int) Option {
+	return func(a *Auth) error {
+		if maxAttempts <= 0 {
+			return fmt.Errorf("%w: max attempts must be positive", ErrInvalidInput)
+		}
+		a.otpMaxAttempts = maxAttempts
 		return nil
 	}
 }
@@ -279,6 +291,11 @@ func New(ctx context.Context, opts ...Option) (*Auth, error) {
 	if a.otpEnabled && len(a.pepper) == 0 {
 		cancel()
 		return nil, errors.New("OTP requires a pepper: configure WithPepper before WithOTP")
+	}
+
+	if a.otpEnabled && a.otpMaxAttempts <= 0 {
+		cancel()
+		return nil, ErrOTPLimitNotInitialized
 	}
 
 	if a.storage != nil {

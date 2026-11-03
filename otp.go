@@ -114,13 +114,25 @@ func (a *Auth) VerifyOTP(ctx context.Context, userEmail, inputCode string) error
 		return fmt.Errorf("%w: %v", ErrDatabaseUnavailable, err)
 	}
 
-	/* Hash the caller-supplied code and compare in constant time to prevent timing oracles. */
+	/* Verify Rate Limiting */
+	maxAttempts := a.otpMaxAttempts
+	if time.Now().After(expiry) {
+		_ = a.storage.DeleteOTP(ctx, userEmail)
+		return ErrOTPExpired
+	}
+
+	/* Increment OTP Attempt Logic here */
+	newAttempts, incErr := a.storage.IncreaseOTPAttempts(ctx, userEmail)
+	if incErr == nil && newAttempts >= maxAttempts {
+		_ = a.storage.DeleteOTP(ctx, userEmail)
+		return ErrOTPMaxLimit
+	}
+
+	/* Hash the caller-supplied code and compare in constant time to prevent timing oracles.
+	Increment precedes hashing: if limit is reached, hashing is unnecessary*/
 	inputHash := a.computeOTPHash(inputCode)
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(inputHash)) != 1 {
 		return ErrInvalidOTP
-	}
-	if time.Now().After(expiry) {
-		return ErrOTPExpired
 	}
 
 	/* Valid! Delete it. */
