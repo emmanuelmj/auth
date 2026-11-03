@@ -35,14 +35,20 @@ func (a *Auth) generateOTP() (string, error) {
 }
 
 /*
-computeOTPHash returns the HMAC-SHA256 of code keyed with the Auth pepper.
-If no pepper is configured the library still provides non-plaintext storage;
-operators are strongly encouraged to configure WithPepper.
-*/
-func (a *Auth) computeOTPHash(code string) string {
-	mac := hmac.New(sha256.New, a.pepper)
+ * computeOTPHash returns the HMAC-SHA256 of code keyed
+ * with the dedicated OTP pepper.
+ */
+func (a *Auth) computeOTPHash(code string) (string, error) {
+	/*
+	 * An empty pepper indicates that WithOTP was not configured.
+	 * WithOTP enforces a minimum pepper length of 32 bytes.
+	 */
+	if len(a.otpPepper) == 0 {
+		return "", ErrOtpPepperNotInitialized
+	}
+	mac := hmac.New(sha256.New, a.otpPepper)
 	mac.Write([]byte(code))
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 /*
@@ -73,7 +79,10 @@ func (a *Auth) SendOTP(ctx context.Context, userEmail string) error {
 	expiry := time.Now().UTC().Add(a.otpExpiry)
 
 	/* 3. Hash the OTP before storage — plaintext codes must never reach the database. */
-	hashedCode := a.computeOTPHash(code)
+	hashedCode, err := a.computeOTPHash(code)
+	if err != nil {
+		return fmt.Errorf("error hashing the otp: %w", err)
+	}
 
 	/* 4. Upsert into DB */
 	if err := a.storage.InsertOTP(ctx, userEmail, hashedCode, expiry); err != nil {
@@ -115,7 +124,10 @@ func (a *Auth) VerifyOTP(ctx context.Context, userEmail, inputCode string) error
 	}
 
 	/* Hash the caller-supplied code and compare in constant time to prevent timing oracles. */
-	inputHash := a.computeOTPHash(inputCode)
+	inputHash, err := a.computeOTPHash(inputCode)
+	if err != nil {
+		return fmt.Errorf("error hashing the otp: %w", err)
+	}
 	if subtle.ConstantTimeCompare([]byte(storedHash), []byte(inputHash)) != 1 {
 		return ErrInvalidOTP
 	}
