@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,15 +20,31 @@ import (
 Test database connection constants.
 These point to a local PostgreSQL instance used exclusively for testing.
 */
-const (
-	testDBPort    = 5432
-	testDBUser    = "testuser"
-	testDBPass    = "testpass"
-	testDBName    = "testauth"
-	testDBHost    = "127.0.0.1"
-	testRedisHost = "127.0.0.1:6379"
-	testRedisPass = ""
+var (
+	testDBPort    = testDBPortFromEnv()
+	testDBUser    = envOrDefault("TEST_DB_USER", "testuser")
+	testDBPass    = envOrDefault("TEST_DB_PASS", "testpass")
+	testDBName    = envOrDefault("TEST_DB_NAME", "testauth")
+	testDBHost    = envOrDefault("TEST_DB_HOST", "127.0.0.1")
+	testRedisHost = envOrDefault("TEST_REDIS_HOST", "127.0.0.1:6379")
+	testRedisPass = os.Getenv("TEST_REDIS_PASS")
 )
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func testDBPortFromEnv() uint16 {
+	value := envOrDefault("TEST_DB_PORT", "5432")
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || port == 0 {
+		panic(fmt.Sprintf("invalid TEST_DB_PORT %q", value))
+	}
+	return uint16(port)
+}
 
 /*
 setupTestAuth initialises a fully working Auth instance backed by a real
@@ -125,13 +143,15 @@ func withJWTOption(t *testing.T, secret string, expiry time.Duration) auth.Optio
 	return auth.WithJWT([]byte(secret), expiry)
 }
 
-/*
-computeTestOTPHash mirrors the library's HMAC-SHA256 keyed with the
-test pepper so that tests inserting OTPs directly into the database
-produce a hash that VerifyOTP can verify.
-*/
+var testOTPPepper = []byte("test_otp_pepper_0123456789abcdef")
+
+func testOTPOption() auth.Option {
+	return auth.WithOTP(6, testOTPPepper, 5*time.Minute)
+}
+
+/* computeTestOTPHash mirrors the library's HMAC-SHA256 OTP hashing. */
 func computeTestOTPHash(code string) string {
-	mac := hmac.New(sha256.New, []byte("test_pepper"))
+	mac := hmac.New(sha256.New, testOTPPepper)
 	mac.Write([]byte(code))
 	return hex.EncodeToString(mac.Sum(nil))
 }
