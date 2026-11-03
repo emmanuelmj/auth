@@ -329,7 +329,7 @@ We bypass SendOTP (needs real SMTP) and insert directly.
 */
 func TestIntegrationOTPVerify(t *testing.T) {
 	skipIfShort(t)
-	a := setupTestAuth(t)
+	a := setupTestAuth(t, testOTPOption())
 	db := getTestDBPool(t, context.Background())
 
 	expiry := time.Now().Add(5 * time.Minute)
@@ -362,7 +362,7 @@ TestIntegrationOTPExpired verifies that an expired OTP is rejected.
 */
 func TestIntegrationOTPExpired(t *testing.T) {
 	skipIfShort(t)
-	a := setupTestAuth(t)
+	a := setupTestAuth(t, testOTPOption())
 	db := getTestDBPool(t, context.Background())
 
 	expiry := time.Now().Add(-1 * time.Minute)
@@ -787,7 +787,7 @@ TestIntegrationRateLimitedOTPVerification tests rate limiting on OTP guessing.
 */
 func TestIntegrationRateLimitedOTPVerification(t *testing.T) {
 	skipIfShort(t)
-	a := setupTestAuth(t)
+	a := setupTestAuth(t, testOTPOption())
 	db := getTestDBPool(t, context.Background())
 
 	rl, _ := auth.NewRateLimiter(auth.RateLimiterConfig{

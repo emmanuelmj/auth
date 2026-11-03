@@ -187,7 +187,7 @@ ago, and a host east of UTC kept it valid for hours.
 func TestIntegrationTimezoneOTPLifecycle(t *testing.T) {
 	skipIfShort(t)
 	sender := &captureSender{}
-	a := setupTestAuth(t, auth.WithOTP(6, 5*time.Minute), auth.WithEmailSender(sender))
+	a := setupTestAuth(t, auth.WithOTP(6, []byte("0123456789abcdef0123456789abcdef"), 5*time.Minute), auth.WithEmailSender(sender))
 	db := getTestDBPool(t, context.Background())
 
 	err := a.SendOTP(context.Background(), "tz-otp@example.com")
@@ -213,7 +213,7 @@ the expiry written by the Go client and by the database's own clock.
 */
 func TestIntegrationTimezoneOTPExpiry(t *testing.T) {
 	skipIfShort(t)
-	a := setupTestAuth(t)
+	a := setupTestAuth(t, testOTPOption())
 	db := getTestDBPool(t, context.Background())
 
 	cases := []struct {
