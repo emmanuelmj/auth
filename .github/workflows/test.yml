@@ -77,9 +77,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo systemctl start postgresql.service
-          sudo -u postgres psql -c "CREATE USER testuser WITH PASSWORD 'testpass';"
-          sudo -u postgres psql -c "CREATE DATABASE testauth OWNER testuser;"
-          sudo -u postgres psql -c "ALTER USER testuser CREATEDB;"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'testuser') THEN CREATE ROLE testuser LOGIN PASSWORD 'testpass'; ELSE ALTER ROLE testuser WITH LOGIN PASSWORD 'testpass'; END IF; END \$\$;"
+          if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'testauth'" | grep -q 1; then
+            sudo -u postgres createdb -O testuser testauth
+          fi
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER DATABASE testauth OWNER TO testuser;"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER ROLE testuser CREATEDB;"
 
       - name: Setup PostgreSQL (macOS)
         if: runner.os == 'macOS'
@@ -91,9 +94,12 @@ jobs:
             sleep 2
           done
           $(brew --prefix postgresql@14)/bin/createuser -s postgres || true
-          $(brew --prefix postgresql@14)/bin/psql -U postgres -c "CREATE USER testuser WITH PASSWORD 'testpass';"
-          $(brew --prefix postgresql@14)/bin/psql -U postgres -c "CREATE DATABASE testauth OWNER testuser;"
-          $(brew --prefix postgresql@14)/bin/psql -U postgres -c "ALTER USER testuser CREATEDB;"
+          $(brew --prefix postgresql@14)/bin/psql -U postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'testuser') THEN CREATE ROLE testuser LOGIN PASSWORD 'testpass'; ELSE ALTER ROLE testuser WITH LOGIN PASSWORD 'testpass'; END IF; END \$\$;"
+          if ! $(brew --prefix postgresql@14)/bin/psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'testauth'" | grep -q 1; then
+            $(brew --prefix postgresql@14)/bin/createdb -U postgres -O testuser testauth
+          fi
+          $(brew --prefix postgresql@14)/bin/psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE testauth OWNER TO testuser;"
+          $(brew --prefix postgresql@14)/bin/psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE testuser CREATEDB;"
 
       - name: Setup PostgreSQL (Windows)
         if: runner.os == 'Windows'
@@ -119,10 +125,18 @@ jobs:
           & "$pgBin\pg_ctl" start -D $pgData -w -t 30
           if ($LASTEXITCODE -ne 0) { Write-Error "pg_ctl start failed"; exit 1 }
 
-          # Bootstrap test credentials
-          & "$pgBin\psql" -U postgres -d postgres -c "CREATE USER testuser WITH PASSWORD 'testpass';"
-          & "$pgBin\psql" -U postgres -d postgres -c "CREATE DATABASE testauth OWNER testuser;"
-          & "$pgBin\psql" -U postgres -d postgres -c "ALTER USER testuser CREATEDB;"
+          # Bootstrap test credentials. Keep this idempotent in case the runner
+          # image already contains a PostgreSQL cluster or test role.
+          & "$pgBin\psql" -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = ''testuser'') THEN CREATE ROLE testuser LOGIN PASSWORD ''testpass''; ELSE ALTER ROLE testuser WITH LOGIN PASSWORD ''testpass''; END IF; END $$;'
+          if ($LASTEXITCODE -ne 0) { Write-Error "creating test role failed"; exit 1 }
+          $databaseExists = & "$pgBin\psql" -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'testauth'"
+          if ($LASTEXITCODE -ne 0) { Write-Error "checking test database failed"; exit 1 }
+          if (($databaseExists -join "").Trim() -ne "1") {
+            & "$pgBin\createdb" -U postgres -O testuser testauth
+            if ($LASTEXITCODE -ne 0) { Write-Error "creating test database failed"; exit 1 }
+          }
+          & "$pgBin\psql" -U postgres -d postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE testauth OWNER TO testuser;"
+          & "$pgBin\psql" -U postgres -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE testuser CREATEDB;"
 
           Write-Host "PostgreSQL $($pgDir.Name) ready — testauth/testuser configured"
 

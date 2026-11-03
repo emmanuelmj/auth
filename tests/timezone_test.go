@@ -213,7 +213,7 @@ the expiry written by the Go client and by the database's own clock.
 */
 func TestIntegrationTimezoneOTPExpiry(t *testing.T) {
 	skipIfShort(t)
-	a := setupTestAuth(t)
+	a := setupTestAuth(t, testOTPOption())
 	db := getTestDBPool(t, context.Background())
 
 	cases := []struct {
