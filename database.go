@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/url"
@@ -55,6 +56,20 @@ type StorageEngine interface {
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	CleanupExpiredRefreshTokens(ctx context.Context) error
 	Close() error
+}
+
+// EmailVerificationStorage adds atomic email-registration and account-verification
+// operations without requiring existing StorageEngine implementations to change.
+type EmailVerificationStorage interface {
+	CreatePendingEmailRegistration(ctx context.Context, email, hash, salt, otpHash string, expiresAt time.Time) error
+	CompletePendingEmailRegistration(ctx context.Context, email, otpHash string, now time.Time) error
+	VerifyExistingEmailOTP(ctx context.Context, email, otpHash string, now time.Time) error
+}
+
+// OAuthAccountStorage creates a verified Google account or reports whether an
+// existing local account is already verified, without replacing its credentials.
+type OAuthAccountStorage interface {
+	UpsertVerifiedOAuthUser(ctx context.Context, email string) (bool, error)
 }
 
 /* PostgresStorage implements the StorageEngine interface using pgxpool. */
@@ -112,7 +127,20 @@ func (p *PostgresStorage) CheckTables(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS users (
 			user_id TEXT PRIMARY KEY, 
 			password_hash TEXT NOT NULL, 
-			salt TEXT NOT NULL
+			salt TEXT NOT NULL,
+			email_verified BOOLEAN NOT NULL DEFAULT false
+		);
+		ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+		-- The legacy OAuth upsert wrote this exact hash/salt pair only after
+		-- HandleGoogleCallback accepted Google's verified_email claim.
+		UPDATE users SET email_verified = true
+		WHERE password_hash = 'OAUTH_MANAGED' AND salt = 'OAUTH_MANAGED_SALT_16B';
+		CREATE TABLE IF NOT EXISTS pending_email_registrations (
+			user_id TEXT PRIMARY KEY,
+			password_hash TEXT NOT NULL,
+			salt TEXT NOT NULL,
+			otp_hash TEXT NOT NULL,
+			expires_at TIMESTAMP NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS roles (
 			role TEXT PRIMARY KEY
@@ -238,6 +266,119 @@ func (p *PostgresStorage) ListUsers(ctx context.Context, limit, offset int) ([]U
 func (p *PostgresStorage) UpsertOAuthUser(ctx context.Context, email string) error {
 	_, err := p.pool.Exec(ctx, "INSERT INTO users (user_id, password_hash, salt) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING", email, OAuthManagedHash, OAuthManagedSalt)
 	return err
+}
+
+// UpsertVerifiedOAuthUser only links to an existing account already verified
+// locally. A newly created Google account is marked verified based on Google's
+// verified-email claim, which the caller must check before calling this method.
+func (p *PostgresStorage) UpsertVerifiedOAuthUser(ctx context.Context, email string) (bool, error) {
+	var userID string
+	err := p.pool.QueryRow(ctx, `
+		INSERT INTO users (user_id, password_hash, salt, email_verified)
+		VALUES ($1, $2, $3, true)
+		ON CONFLICT (user_id) DO UPDATE
+		SET email_verified = users.email_verified
+		WHERE users.email_verified = true
+		RETURNING user_id`, email, OAuthManagedHash, OAuthManagedSalt).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CreatePendingEmailRegistration replaces any earlier pending attempt for this
+// email. The caller supplies only a password hash and salt, never a plaintext password.
+func (p *PostgresStorage) CreatePendingEmailRegistration(ctx context.Context, email, hash, salt, otpHash string, expiresAt time.Time) error {
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO pending_email_registrations (user_id, password_hash, salt, otp_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id) DO UPDATE SET
+			password_hash = EXCLUDED.password_hash,
+			salt = EXCLUDED.salt,
+			otp_hash = EXCLUDED.otp_hash,
+			expires_at = EXCLUDED.expires_at`, email, hash, salt, otpHash, expiresAt)
+	return err
+}
+
+// CompletePendingEmailRegistration verifies and consumes the pending OTP in a
+// transaction, then inserts the verified user. The row lock makes completion
+// single-use even when two verification requests race.
+func (p *PostgresStorage) CompletePendingEmailRegistration(ctx context.Context, email, otpHash string, now time.Time) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var hash, salt, storedOTPHash string
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT password_hash, salt, otp_hash, expires_at
+		FROM pending_email_registrations WHERE user_id = $1 FOR UPDATE`, email).
+		Scan(&hash, &salt, &storedOTPHash, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInvalidOTP
+	}
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(storedOTPHash), []byte(otpHash)) != 1 {
+		return ErrInvalidOTP
+	}
+	if !now.Before(expiresAt) {
+		return ErrOTPExpired
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO users (user_id, password_hash, salt, email_verified)
+		VALUES ($1, $2, $3, true)`, email, hash, salt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM pending_email_registrations WHERE user_id = $1", email); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// VerifyExistingEmailOTP atomically consumes a general OTP and marks an
+// existing local account verified. This supports users whose status was set to
+// false by the security-first schema migration.
+func (p *PostgresStorage) VerifyExistingEmailOTP(ctx context.Context, email, otpHash string, now time.Time) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var storedOTPHash string
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, "SELECT code, expires_at FROM otps WHERE email = $1 FOR UPDATE", email).
+		Scan(&storedOTPHash, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrInvalidOTP
+	}
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(storedOTPHash), []byte(otpHash)) != 1 {
+		return ErrInvalidOTP
+	}
+	if !now.Before(expiresAt) {
+		return ErrOTPExpired
+	}
+	cmd, err := tx.Exec(ctx, "UPDATE users SET email_verified = true WHERE user_id = $1", email)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM otps WHERE email = $1", email); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 /* Spaces */

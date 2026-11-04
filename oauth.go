@@ -64,8 +64,12 @@ func (a *Auth) HandleGoogleCallback(ctx context.Context, code string) (string, e
 		return "", fmt.Errorf("oauth email is not verified by provider")
 	}
 
-	if err := a.upsertOAuthUser(ctx, user.Email); err != nil {
+	linked, err := a.upsertOAuthUser(ctx, user.Email)
+	if err != nil {
 		return "", err
+	}
+	if !linked {
+		return "", ErrEmailNotVerified
 	}
 
 	jwtStr, err := a.GenerateToken(ctx, user.Email)

@@ -56,17 +56,17 @@ func TestIntegrationRegisterAndLogin(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
 
-	err := a.RegisterUser(context.Background(), "alice@example.com", "StrongP@ssw0rd1")
+	err := a.RegisterUser(context.Background(), "alice", "StrongP@ssw0rd1")
 	if err != nil {
 		t.Fatalf("failed to register user: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "alice@example.com", "StrongP@ssw0rd1")
+	err = a.LoginUser(context.Background(), "alice", "StrongP@ssw0rd1")
 	if err != nil {
 		t.Errorf("expected successful login, got: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "alice@example.com", "wrongpassword")
+	err = a.LoginUser(context.Background(), "alice", "wrongpassword")
 	if err == nil {
 		t.Error("expected error for wrong password")
 	}
@@ -76,12 +76,12 @@ func TestIntegrationRegisterAndLogin(t *testing.T) {
 		t.Error("expected error for non-existent user")
 	}
 
-	err = a.DeleteUser(context.Background(), "alice@example.com")
+	err = a.DeleteUser(context.Background(), "alice")
 	if err != nil {
 		t.Errorf("failed to delete user: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "alice@example.com", "StrongP@ssw0rd1")
+	err = a.LoginUser(context.Background(), "alice", "StrongP@ssw0rd1")
 	if err == nil {
 		t.Error("expected error logging in after deletion")
 	}
@@ -93,14 +93,16 @@ TestIntegrationUserExists verifies the UserExists check against a real database.
 func TestIntegrationUserExists(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "check@example.com", "P@ssword123!")
+	if err := a.RegisterUser(context.Background(), "check@example.com", "P@ssword123!"); !errors.Is(err, auth.ErrEmailVerificationRequired) {
+		t.Fatalf("expected email registration to require verification, got: %v", err)
+	}
 
 	exists, err := a.UserExists(context.Background(), "check@example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !exists {
-		t.Error("expected user to exist")
+	if exists {
+		t.Error("email registration must not create an account before verification")
 	}
 
 	exists, err = a.UserExists(context.Background(), "nobody@example.com")
@@ -119,9 +121,9 @@ func TestIntegrationListUsers(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
 
-	_ = a.RegisterUser(context.Background(), "list1@example.com", "TestP@ss0001!")
-	_ = a.RegisterUser(context.Background(), "list2@example.com", "TestP@ss0002!")
-	_ = a.RegisterUser(context.Background(), "list3@example.com", "TestP@ss0003!")
+	_ = a.RegisterUser(context.Background(), "list1", "TestP@ss0001!")
+	_ = a.RegisterUser(context.Background(), "list2", "TestP@ss0002!")
+	_ = a.RegisterUser(context.Background(), "list3", "TestP@ss0003!")
 
 	users, err := a.ListUsers(context.Background(), 2, 0)
 	if err != nil {
@@ -146,19 +148,19 @@ TestIntegrationChangePassword verifies that password changes work end-to-end.
 func TestIntegrationChangePassword(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "changeme@example.com", "OldP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "changeme", "OldP@ssword1!")
 
-	err := a.ChangePass(context.Background(), "changeme@example.com", "NewP@ssword1!")
+	err := a.ChangePass(context.Background(), "changeme", "NewP@ssword1!")
 	if err != nil {
 		t.Fatalf("failed to change password: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "changeme@example.com", "OldP@ssword1!")
+	err = a.LoginUser(context.Background(), "changeme", "OldP@ssword1!")
 	if err == nil {
 		t.Error("expected old password to fail after change")
 	}
 
-	err = a.LoginUser(context.Background(), "changeme@example.com", "NewP@ssword1!")
+	err = a.LoginUser(context.Background(), "changeme", "NewP@ssword1!")
 	if err != nil {
 		t.Errorf("expected new password to succeed: %v", err)
 	}
@@ -184,12 +186,12 @@ func TestIntegrationDuplicateRegistration(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
 
-	err := a.RegisterUser(context.Background(), "dupe@example.com", "P@ssword1234!")
+	err := a.RegisterUser(context.Background(), "dupe", "P@ssword1234!")
 	if err != nil {
 		t.Fatalf("first registration failed: %v", err)
 	}
 
-	err = a.RegisterUser(context.Background(), "dupe@example.com", "P@ssword5678!")
+	err = a.RegisterUser(context.Background(), "dupe", "P@ssword5678!")
 	if err == nil {
 		t.Error("expected error for duplicate registration")
 	}
@@ -204,14 +206,14 @@ register -> login with password -> generate JWT -> validate -> LoginJWT.
 func TestIntegrationRegisterLoginJWT(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t, auth.WithJWT([]byte("integration-test-secret"), 24*time.Hour))
-	_ = a.RegisterUser(context.Background(), "jwtuser@example.com", "S3cureP@ss12!")
+	_ = a.RegisterUser(context.Background(), "jwtuser", "S3cureP@ss12!")
 
-	err := a.LoginUser(context.Background(), "jwtuser@example.com", "S3cureP@ss12!")
+	err := a.LoginUser(context.Background(), "jwtuser", "S3cureP@ss12!")
 	if err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
 
-	token, err := a.GenerateToken(context.Background(), "jwtuser@example.com")
+	token, err := a.GenerateToken(context.Background(), "jwtuser")
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
 	}
@@ -220,16 +222,16 @@ func TestIntegrationRegisterLoginJWT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to validate token: %v", err)
 	}
-	if claims.UserID != "jwtuser@example.com" {
-		t.Errorf("expected 'jwtuser@example.com', got '%s'", claims.UserID)
+	if claims.UserID != "jwtuser" {
+		t.Errorf("expected 'jwtuser', got '%s'", claims.UserID)
 	}
 
 	claims2, err := a.LoginJWT(context.Background(), token)
 	if err != nil {
 		t.Fatalf("LoginJWT failed: %v", err)
 	}
-	if claims2.UserID != "jwtuser@example.com" {
-		t.Errorf("expected 'jwtuser@example.com', got '%s'", claims2.UserID)
+	if claims2.UserID != "jwtuser" {
+		t.Errorf("expected 'jwtuser', got '%s'", claims2.UserID)
 	}
 }
 
@@ -241,9 +243,9 @@ TestIntegrationPepperRegistration verifies peppered registration round-trip.
 func TestIntegrationPepperRegistration(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t, auth.WithPepper([]byte("test-pepper-value")))
-	_ = a.RegisterUser(context.Background(), "peppered@example.com", "MyP@ssword12!")
+	_ = a.RegisterUser(context.Background(), "peppered", "MyP@ssword12!")
 
-	err := a.LoginUser(context.Background(), "peppered@example.com", "MyP@ssword12!")
+	err := a.LoginUser(context.Background(), "peppered", "MyP@ssword12!")
 	if err != nil {
 		t.Errorf("login with pepper should succeed: %v", err)
 	}
@@ -268,26 +270,26 @@ func TestIntegrationSpacesRolesPermissions(t *testing.T) {
 		t.Fatalf("failed to create role: %v", err)
 	}
 
-	_ = a.RegisterUser(context.Background(), "rbac@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "rbac", "TestP@ssword1!")
 
-	err = a.CreatePermissions(context.Background(), "rbac@example.com", "workspace-alpha", "admin")
+	err = a.CreatePermissions(context.Background(), "rbac", "workspace-alpha", "admin")
 	if err != nil {
 		t.Fatalf("failed to assign permission: %v", err)
 	}
 
-	err = a.CheckPermissions(context.Background(), "rbac@example.com", "workspace-alpha", "admin")
+	err = a.CheckPermissions(context.Background(), "rbac", "workspace-alpha", "admin")
 	if err != nil {
 		t.Errorf("expected permission to exist: %v", err)
 	}
 
-	err = a.CheckPermissions(context.Background(), "rbac@example.com", "workspace-alpha", "viewer")
+	err = a.CheckPermissions(context.Background(), "rbac", "workspace-alpha", "viewer")
 	if err == nil {
 		t.Error("expected error for non-existent permission")
 	}
 
-	_ = a.DeletePermission(context.Background(), "rbac@example.com", "workspace-alpha", "admin")
+	_ = a.DeletePermission(context.Background(), "rbac", "workspace-alpha", "admin")
 
-	err = a.CheckPermissions(context.Background(), "rbac@example.com", "workspace-alpha", "admin")
+	err = a.CheckPermissions(context.Background(), "rbac", "workspace-alpha", "admin")
 	if err == nil {
 		t.Error("expected error after deleting permission")
 	}
@@ -305,17 +307,17 @@ func TestIntegrationCascadeDeleteUser(t *testing.T) {
 
 	_ = a.CreateSpace(context.Background(), "cascade-space", 1)
 	_ = a.CreateRole(context.Background(), "editor")
-	_ = a.RegisterUser(context.Background(), "cascade@example.com", "TestP@ssword1!")
-	_ = a.CreatePermissions(context.Background(), "cascade@example.com", "cascade-space", "editor")
+	_ = a.RegisterUser(context.Background(), "cascade", "TestP@ssword1!")
+	_ = a.CreatePermissions(context.Background(), "cascade", "cascade-space", "editor")
 
-	err := a.CheckPermissions(context.Background(), "cascade@example.com", "cascade-space", "editor")
+	err := a.CheckPermissions(context.Background(), "cascade", "cascade-space", "editor")
 	if err != nil {
 		t.Fatalf("permission should exist before delete: %v", err)
 	}
 
-	_ = a.DeleteUser(context.Background(), "cascade@example.com")
+	_ = a.DeleteUser(context.Background(), "cascade")
 
-	err = a.CheckPermissions(context.Background(), "cascade@example.com", "cascade-space", "editor")
+	err = a.CheckPermissions(context.Background(), "cascade", "cascade-space", "editor")
 	if err == nil {
 		t.Error("expected permission to be cascade-deleted with user")
 	}
@@ -444,9 +446,9 @@ generate -> validate -> rotate -> old revoked -> new valid -> explicit revoke.
 func TestIntegrationRefreshTokenFullCycle(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "refresh@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "refresh", "TestP@ssword1!")
 
-	token, err := a.GenerateRefreshToken(context.Background(), "refresh@example.com")
+	token, err := a.GenerateRefreshToken(context.Background(), "refresh")
 	if err != nil {
 		t.Fatalf("failed to generate refresh token: %v", err)
 	}
@@ -462,8 +464,8 @@ func TestIntegrationRefreshTokenFullCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to validate refresh token: %v", err)
 	}
-	if userID != "refresh@example.com" {
-		t.Errorf("expected 'refresh@example.com', got '%s'", userID)
+	if userID != "refresh" {
+		t.Errorf("expected 'refresh', got '%s'", userID)
 	}
 
 	newToken, rotatedUserID, err := a.RotateRefreshToken(context.Background(), token)
@@ -473,8 +475,8 @@ func TestIntegrationRefreshTokenFullCycle(t *testing.T) {
 	if newToken == "" || newToken == token {
 		t.Error("expected a new, different token")
 	}
-	if rotatedUserID != "refresh@example.com" {
-		t.Errorf("expected 'refresh@example.com', got '%s'", rotatedUserID)
+	if rotatedUserID != "refresh" {
+		t.Errorf("expected 'refresh', got '%s'", rotatedUserID)
 	}
 
 	_, err = a.ValidateRefreshToken(context.Background(), token)
@@ -501,13 +503,13 @@ TestIntegrationRefreshTokenRevokeAll tests revoking all tokens for a user.
 func TestIntegrationRefreshTokenRevokeAll(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "revokeall@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "revokeall", "TestP@ssword1!")
 
-	token1, _ := a.GenerateRefreshToken(context.Background(), "revokeall@example.com")
-	token2, _ := a.GenerateRefreshToken(context.Background(), "revokeall@example.com")
-	token3, _ := a.GenerateRefreshToken(context.Background(), "revokeall@example.com")
+	token1, _ := a.GenerateRefreshToken(context.Background(), "revokeall")
+	token2, _ := a.GenerateRefreshToken(context.Background(), "revokeall")
+	token3, _ := a.GenerateRefreshToken(context.Background(), "revokeall")
 
-	_ = a.RevokeAllUserRefreshTokens(context.Background(), "revokeall@example.com")
+	_ = a.RevokeAllUserRefreshTokens(context.Background(), "revokeall")
 
 	for _, tok := range []string{token1, token2, token3} {
 		_, err := a.ValidateRefreshToken(context.Background(), tok)
@@ -537,12 +539,12 @@ func TestIntegrationRefreshTokenCleanup(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
 	db := getTestDBPool(t, context.Background())
-	_ = a.RegisterUser(context.Background(), "cleanup@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "cleanup", "TestP@ssword1!")
 
 	expiredTime := time.Now().Add(-1 * time.Hour)
 	_, _ = db.Exec(context.Background(),
 		"INSERT INTO refresh_tokens (token, user_id, expires_at, revoked, created_at) VALUES ($1, $2, $3, false, NOW())",
-		"expired-token-abc", "cleanup@example.com", expiredTime,
+		"expired-token-abc", "cleanup", expiredTime,
 	)
 
 	_ = a.CleanupExpiredRefreshTokens(context.Background())
@@ -559,16 +561,16 @@ TestIntegrationRefreshTokenCascadeDeleteUser verifies FK ON DELETE CASCADE for r
 func TestIntegrationRefreshTokenCascadeDeleteUser(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "cascade-rt@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "cascade-rt", "TestP@ssword1!")
 
-	token, _ := a.GenerateRefreshToken(context.Background(), "cascade-rt@example.com")
+	token, _ := a.GenerateRefreshToken(context.Background(), "cascade-rt")
 
 	_, err := a.ValidateRefreshToken(context.Background(), token)
 	if err != nil {
 		t.Fatalf("token should be valid: %v", err)
 	}
 
-	_ = a.DeleteUser(context.Background(), "cascade-rt@example.com")
+	_ = a.DeleteUser(context.Background(), "cascade-rt")
 
 	_, err = a.ValidateRefreshToken(context.Background(), token)
 	if !errors.Is(err, auth.ErrRefreshTokenInvalid) {
@@ -583,9 +585,9 @@ all old tokens revoked, only the latest valid.
 func TestIntegrationRefreshTokenChainRotation(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t)
-	_ = a.RegisterUser(context.Background(), "chain@example.com", "TestP@ssword1!")
+	_ = a.RegisterUser(context.Background(), "chain", "TestP@ssword1!")
 
-	token, _ := a.GenerateRefreshToken(context.Background(), "chain@example.com")
+	token, _ := a.GenerateRefreshToken(context.Background(), "chain")
 
 	var allOldTokens []string
 	for i := 0; i < 5; i++ {
@@ -608,8 +610,8 @@ func TestIntegrationRefreshTokenChainRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("latest token should be valid: %v", err)
 	}
-	if userID != "chain@example.com" {
-		t.Errorf("expected 'chain@example.com', got '%s'", userID)
+	if userID != "chain" {
+		t.Errorf("expected 'chain', got '%s'", userID)
 	}
 }
 
@@ -623,21 +625,21 @@ func TestIntegrationJWTRefreshTokenFlow(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t, auth.WithJWT([]byte("jwt-refresh-test-secret"), 24*time.Hour))
 
-	_ = a.RegisterUser(context.Background(), "fullflow@example.com", "MyP@ssword12!")
+	_ = a.RegisterUser(context.Background(), "fullflow", "MyP@ssword12!")
 
-	err := a.LoginUser(context.Background(), "fullflow@example.com", "MyP@ssword12!")
+	err := a.LoginUser(context.Background(), "fullflow", "MyP@ssword12!")
 	if err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
 
-	accessToken, _ := a.GenerateToken(context.Background(), "fullflow@example.com", 1*time.Hour)
-	refreshToken, _ := a.GenerateRefreshToken(context.Background(), "fullflow@example.com")
+	accessToken, _ := a.GenerateToken(context.Background(), "fullflow", 1*time.Hour)
+	refreshToken, _ := a.GenerateRefreshToken(context.Background(), "fullflow")
 
 	claims, err := a.ValidateToken(context.Background(), accessToken)
 	if err != nil {
 		t.Fatalf("failed to validate access token: %v", err)
 	}
-	if claims.UserID != "fullflow@example.com" {
+	if claims.UserID != "fullflow" {
 		t.Errorf("unexpected UserID: %s", claims.UserID)
 	}
 
@@ -652,7 +654,7 @@ func TestIntegrationJWTRefreshTokenFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to validate new access token: %v", err)
 	}
-	if claims.UserID != "fullflow@example.com" {
+	if claims.UserID != "fullflow" {
 		t.Errorf("unexpected UserID: %s", claims.UserID)
 	}
 
@@ -682,13 +684,13 @@ func TestIntegrationRateLimitedLogin(t *testing.T) {
 	})
 	defer rl.Stop()
 
-	_ = a.RegisterUser(context.Background(), "limited@example.com", "CorrectP@ss1!")
+	_ = a.RegisterUser(context.Background(), "limited", "CorrectP@ss1!")
 
-	userKey := "limited@example.com"
+	userKey := "limited"
 
 	for i := 0; i < 3; i++ {
 		_ = rl.Allow(context.Background(), userKey)
-		_ = a.LoginUser(context.Background(), "limited@example.com", "wrongpass")
+		_ = a.LoginUser(context.Background(), "limited", "wrongpass")
 	}
 
 	err := rl.Allow(context.Background(), userKey)
@@ -703,7 +705,7 @@ func TestIntegrationRateLimitedLogin(t *testing.T) {
 		t.Errorf("expected allowed after reset: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "limited@example.com", "CorrectP@ss1!")
+	err = a.LoginUser(context.Background(), "limited", "CorrectP@ss1!")
 	if err != nil {
 		t.Errorf("expected successful login after reset: %v", err)
 	}
@@ -751,13 +753,13 @@ func TestIntegrationPasswordChangeRevokesTokens(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t, auth.WithJWT([]byte("pass-change-secret"), 24*time.Hour))
 
-	_ = a.RegisterUser(context.Background(), "secure@example.com", "OldP@ss12345!")
+	_ = a.RegisterUser(context.Background(), "secure", "OldP@ss12345!")
 
-	rt1, _ := a.GenerateRefreshToken(context.Background(), "secure@example.com")
-	rt2, _ := a.GenerateRefreshToken(context.Background(), "secure@example.com")
+	rt1, _ := a.GenerateRefreshToken(context.Background(), "secure")
+	rt2, _ := a.GenerateRefreshToken(context.Background(), "secure")
 
-	_ = a.ChangePass(context.Background(), "secure@example.com", "NewP@ss12345!")
-	_ = a.RevokeAllUserRefreshTokens(context.Background(), "secure@example.com")
+	_ = a.ChangePass(context.Background(), "secure", "NewP@ss12345!")
+	_ = a.RevokeAllUserRefreshTokens(context.Background(), "secure")
 
 	_, err := a.ValidateRefreshToken(context.Background(), rt1)
 	if !errors.Is(err, auth.ErrRefreshTokenRevoked) {
@@ -768,12 +770,12 @@ func TestIntegrationPasswordChangeRevokesTokens(t *testing.T) {
 		t.Errorf("expected rt2 revoked, got: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "secure@example.com", "NewP@ss12345!")
+	err = a.LoginUser(context.Background(), "secure", "NewP@ss12345!")
 	if err != nil {
 		t.Errorf("login with new password should succeed: %v", err)
 	}
 
-	rtNew, _ := a.GenerateRefreshToken(context.Background(), "secure@example.com")
+	rtNew, _ := a.GenerateRefreshToken(context.Background(), "secure")
 	_, err = a.ValidateRefreshToken(context.Background(), rtNew)
 	if err != nil {
 		t.Errorf("new refresh token should be valid: %v", err)
@@ -836,21 +838,21 @@ func TestIntegrationFullAuthFlow(t *testing.T) {
 	_ = a.CreateRole(context.Background(), "viewer")
 	_ = a.CreateRole(context.Background(), "admin")
 
-	err := a.RegisterUser(context.Background(), "fulltest@example.com", "MyS3cureP@ss")
+	err := a.RegisterUser(context.Background(), "fulltest", "MyS3cureP@ss")
 	if err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
-	_ = a.CreatePermissions(context.Background(), "fulltest@example.com", "dashboard", "viewer")
+	_ = a.CreatePermissions(context.Background(), "fulltest", "dashboard", "viewer")
 
-	_ = rl.Allow(context.Background(), "fulltest@example.com")
-	err = a.LoginUser(context.Background(), "fulltest@example.com", "MyS3cureP@ss")
+	_ = rl.Allow(context.Background(), "fulltest")
+	err = a.LoginUser(context.Background(), "fulltest", "MyS3cureP@ss")
 	if err != nil {
 		t.Fatalf("login failed: %v", err)
 	}
 
-	jwt, _ := a.GenerateToken(context.Background(), "fulltest@example.com")
-	rt, _ := a.GenerateRefreshToken(context.Background(), "fulltest@example.com")
+	jwt, _ := a.GenerateToken(context.Background(), "fulltest")
+	rt, _ := a.GenerateRefreshToken(context.Background(), "fulltest")
 
 	claims, _ := a.LoginJWT(context.Background(), jwt)
 
@@ -868,33 +870,33 @@ func TestIntegrationFullAuthFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotation failed: %v", err)
 	}
-	if userID != "fulltest@example.com" {
+	if userID != "fulltest" {
 		t.Errorf("unexpected user: %s", userID)
 	}
 
-	_ = a.ChangePass(context.Background(), "fulltest@example.com", "NewP@ssw0rd!")
-	_ = a.RevokeAllUserRefreshTokens(context.Background(), "fulltest@example.com")
+	_ = a.ChangePass(context.Background(), "fulltest", "NewP@ssw0rd!")
+	_ = a.RevokeAllUserRefreshTokens(context.Background(), "fulltest")
 
 	_, err = a.ValidateRefreshToken(context.Background(), newRT)
 	if !errors.Is(err, auth.ErrRefreshTokenRevoked) {
 		t.Errorf("expected revoked, got: %v", err)
 	}
 
-	err = a.LoginUser(context.Background(), "fulltest@example.com", "NewP@ssw0rd!")
+	err = a.LoginUser(context.Background(), "fulltest", "NewP@ssw0rd!")
 	if err != nil {
 		t.Fatalf("re-login failed: %v", err)
 	}
 
-	newJWT, _ := a.GenerateToken(context.Background(), "fulltest@example.com")
+	newJWT, _ := a.GenerateToken(context.Background(), "fulltest")
 	finalClaims, err := a.ValidateToken(context.Background(), newJWT)
 	if err != nil {
 		t.Fatalf("failed to validate new JWT: %v", err)
 	}
-	if finalClaims.UserID != "fulltest@example.com" {
+	if finalClaims.UserID != "fulltest" {
 		t.Errorf("unexpected final UserID: %s", finalClaims.UserID)
 	}
 
-	newFinalRT, _ := a.GenerateRefreshToken(context.Background(), "fulltest@example.com")
+	newFinalRT, _ := a.GenerateRefreshToken(context.Background(), "fulltest")
 	_, err = a.ValidateRefreshToken(context.Background(), newFinalRT)
 	if err != nil {
 		t.Errorf("final refresh token should be valid: %v", err)

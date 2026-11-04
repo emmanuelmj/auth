@@ -19,7 +19,7 @@ func TestRefreshTokenGenerateAndValidateWithRedis(t *testing.T) {
 	}
 	a := setupTestAuth(t, withRedisOption(t), auth.WithRefreshToken(1*time.Hour, 32))
 
-	userID := "redis-user-1@example.com"
+	userID := "redis-user-1"
 	if err := a.RegisterUser(context.Background(), userID, "TestP@ssword1!"); err != nil {
 		t.Fatalf("failed to register user: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRefreshTokenRevokeWithRedis(t *testing.T) {
 	}
 	a := setupTestAuth(t, withRedisOption(t), auth.WithRefreshToken(1*time.Hour, 32))
 
-	userID := "redis-user-2@example.com"
+	userID := "redis-user-2"
 	if err := a.RegisterUser(context.Background(), userID, "TestP@ssword2!"); err != nil {
 		t.Fatalf("failed to register user: %v", err)
 	}
@@ -88,17 +88,17 @@ func TestRevokeAllUserRefreshTokensWithRedis(t *testing.T) {
 	}
 	a := setupTestAuth(t, withRedisOption(t), auth.WithRefreshToken(1*time.Hour, 32))
 
-	userID := "redis-user-3@example.com"
+	userID := "redis-user-3"
 	if err := a.RegisterUser(context.Background(), userID, "TestP@ssword3!"); err != nil {
 		t.Fatalf("failed to register user: %v", err)
 	}
 	token1, _ := a.GenerateRefreshToken(context.Background(), userID)
 	token2, _ := a.GenerateRefreshToken(context.Background(), userID)
 
-	if err := a.RegisterUser(context.Background(), "redis-other@example.com", "TestP@ssword4!"); err != nil {
+	if err := a.RegisterUser(context.Background(), "redis-other", "TestP@ssword4!"); err != nil {
 		t.Fatalf("failed to register other user: %v", err)
 	}
-	otherToken, _ := a.GenerateRefreshToken(context.Background(), "redis-other@example.com")
+	otherToken, _ := a.GenerateRefreshToken(context.Background(), "redis-other")
 
 	err := a.RevokeAllUserRefreshTokens(context.Background(), userID)
 	if err != nil {
@@ -112,7 +112,7 @@ func TestRevokeAllUserRefreshTokensWithRedis(t *testing.T) {
 		t.Error("expected token2 to be invalid after mass revocation")
 	}
 
-	if uid, err := a.ValidateRefreshToken(context.Background(), otherToken); err != nil || uid != "redis-other@example.com" {
+	if uid, err := a.ValidateRefreshToken(context.Background(), otherToken); err != nil || uid != "redis-other" {
 		t.Errorf("expected other user's token to remain valid, got err: %v", err)
 	}
 }

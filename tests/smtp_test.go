@@ -275,8 +275,6 @@ func TestSMTPMockFullOTPFlow(t *testing.T) {
 
 	userEmail := "otpflow@example.com"
 
-	_ = a.RegisterUser(context.Background(), userEmail, "TestP@ssword1!")
-
 	err := a.SendOTP(context.Background(), userEmail)
 	if err != nil && !strings.Contains(err.Error(), "failed to send email") {
 		t.Fatalf("unexpected error from SendOTP: %v", err)
