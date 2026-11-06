@@ -17,6 +17,8 @@ Auth. Works with Postgres. Supports multiple auth methods (Password, JWT, OTP), 
 * You can also handle users with **`auth.RegisterUser()`**, **`auth.LoginUser()`**, **`auth.LoginJWT()`** and **`auth.DeleteUser()`**.
 * For roles, use **`auth.CreateRole()`** and **`auth.DeleteRole()`**.
 
+Email addresses used as usernames must now be registered with `StartEmailRegistration` and `CompleteEmailRegistration`. `RegisterUser` rejects email-shaped usernames because it creates accounts immediately, before email ownership can be verified. This is a behavioral compatibility change for existing callers: update email registration to start the OTP flow, deliver the code, and complete registration only after the user supplies it. Existing callers using non-email usernames can continue using `RegisterUser` unchanged. See [the email verification guide](docs/email_verification.md) for configuration and examples.
+
 ## Contributing
 All Pull Requests should be sent directly to this repository (**[emmanuelmj/auth](https://github.com/emmanuelmj/auth)**), not the main `GCETOSF` org repo.
 

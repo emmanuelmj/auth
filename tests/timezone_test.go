@@ -263,22 +263,24 @@ func TestIntegrationTimezoneRefreshTokenLifecycle(t *testing.T) {
 	skipIfShort(t)
 	a := setupTestAuth(t, auth.WithRefreshToken(2*time.Hour, 32))
 	db := getTestDBPool(t, context.Background())
-	_ = a.RegisterUser(context.Background(), "tz-refresh@example.com", "TestP@ssword1!")
+	if err := a.RegisterUser(context.Background(), "tz-refresh", "TestP@ssword1!"); err != nil {
+		t.Fatalf("failed to register user: %v", err)
+	}
 
-	token, err := a.GenerateRefreshToken(context.Background(), "tz-refresh@example.com")
+	token, err := a.GenerateRefreshToken(context.Background(), "tz-refresh")
 	if err != nil {
 		t.Fatalf("failed to generate refresh token: %v", err)
 	}
 	assertStoredExpiry(t, db, "refresh_tokens", "token", token, 2*time.Hour)
 
 	userID, err := a.ValidateRefreshToken(context.Background(), token)
-	if err != nil || userID != "tz-refresh@example.com" {
+	if err != nil || userID != "tz-refresh" {
 		t.Fatalf("expected the new token to validate, got user=%q err=%v", userID, err)
 	}
 
 	_, err = db.Exec(context.Background(),
 		"INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES ($1, $2, $3), ($4, $2, NOW() - INTERVAL '1 hour')",
-		"go-expired", "tz-refresh@example.com", time.Now().Add(-1*time.Hour), "db-expired",
+		"go-expired", "tz-refresh", time.Now().Add(-1*time.Hour), "db-expired",
 	)
 	if err != nil {
 		t.Fatalf("failed to insert expired tokens: %v", err)
