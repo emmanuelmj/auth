@@ -59,9 +59,10 @@ function Start-DummySMTPServer {
 				}
 
 				# Handle SMTP conversation
+				$noBom = [System.Text.UTF8Encoding]::new($false)
 				$stream = $client.GetStream()
-				$reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
-				$writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::UTF8)
+				$reader = [System.IO.StreamReader]::new($stream, $noBom)
+				$writer = [System.IO.StreamWriter]::new($stream, $noBom)
 				$writer.NewLine = "`r`n"
 
 				# 220 banner
