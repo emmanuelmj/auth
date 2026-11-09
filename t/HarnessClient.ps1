@@ -89,6 +89,7 @@ function Invoke-Harness {
 		[string]$Endpoint,
 		[Parameter(Position = 1)]
 		$Body = $null,
+		[Parameter(Position = 2)]
 		[string]$Method = "POST"
 	)
 
