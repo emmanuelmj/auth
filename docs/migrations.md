@@ -28,11 +28,11 @@ PGOPTIONS="-c auth.legacy_tz=Asia/Kolkata" psql "$DATABASE_URL" -f migrations/00
 * **Not changed:** `created_at` in `refresh_tokens` is not an expiry column, so it stays a `TIMESTAMP`. It is written by `NOW()` on a connection that is set to UTC.
 
 ## 2. Testing other time zones
-The tests in `tests/timezone_test.go` cover the OTP and refresh token expiry, the storage layer and this migration.
+The tests in `t/11-Timezone.Tests.ps1` cover the OTP and refresh token expiry, the storage layer and this migration.
 To run the whole test process in another time zone, set `AUTH_TEST_TZ` (the normal `TZ` variable is not used because Go ignores it on Windows):
 
 ```
-AUTH_TEST_TZ=Asia/Kolkata go test ./tests/
+AUTH_TEST_TZ=Asia/Kolkata make test
 ```
 
 The CI does this for three zones (+5:30, -8 or -7 with daylight saving, and +14), so a change that makes expiry depend on the server's time zone fails the build.
