@@ -100,32 +100,16 @@ function Invoke-Harness {
 	$headers = @{ "Content-Type" = "application/json" }
 	$jsonBody = if ($null -ne $Body) { $Body | ConvertTo-Json -Depth 10 -Compress } else { "{}" }
 
-	try {
-		$resp = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $jsonBody
-		return $resp
-	} catch {
-		# Extract error message from response body if possible
-		$msg = $_.Exception.Message
-		if ($_.Exception.Response) {
-			try {
-				$stream = $_.Exception.Response.GetResponseStream()
-				$reader = [System.IO.StreamReader]::new($stream)
-				$raw = $reader.ReadToEnd()
-				$parsed = $raw | ConvertFrom-Json
-				if ($parsed.error) {
-					$msg = $parsed.error
-				}
-			} catch {}
-		} elseif ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-			try {
-				$parsed = $_.ErrorDetails.Message | ConvertFrom-Json
-				if ($parsed.error) {
-					$msg = $parsed.error
-				}
-			} catch {}
+	$resp = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $jsonBody -SkipHttpErrorCheck
+
+	if ($null -ne $resp -and $resp.PSObject.Properties['success']) {
+		if (-not $resp.success) {
+			$errMsg = if ($resp.error) { $resp.error } else { "Unknown harness error" }
+			throw $errMsg
 		}
-		throw $msg
 	}
+
+	return $resp
 }
 
 function Reset-HarnessState {
@@ -150,24 +134,36 @@ function Reset-HarnessState {
 		$Policy = $null
 	)
 
-	$payload = @{
-		storage          = $Storage
-		pepper           = $Pepper
-		jwt_secret       = $JWTSecret
-		jwt_expiry       = $JWTExpiry
-		otp_pepper       = $OTPPepper
-		otp_length       = $OTPLength
-		otp_expiry       = $OTPExpiry
-		refresh_expiry   = $RefreshExpiry
-		refresh_length   = $RefreshLength
-		smtp_host        = $SMTPHost
-		smtp_port        = $SMTPPort
-		smtp_user        = $SMTPUser
-		smtp_pass        = $SMTPPass
-		oauth_client_id  = $OAuthClientID
-		oauth_client_secret = $OAuthSecret
-		oauth_redirect   = $OAuthRedirect
-		password_policy  = $Policy
+	$payload = [ordered]@{
+		storage = $Storage
+	}
+	if ($Pepper) { $payload["pepper"] = $Pepper }
+	if ($JWTSecret) {
+		$payload["jwt_secret"] = $JWTSecret
+		$payload["jwt_expiry"] = $JWTExpiry
+	}
+	if ($OTPPepper) {
+		$payload["otp_pepper"] = $OTPPepper
+		$payload["otp_length"] = $OTPLength
+		$payload["otp_expiry"] = $OTPExpiry
+	}
+	if ($RefreshExpiry) {
+		$payload["refresh_expiry"] = $RefreshExpiry
+		$payload["refresh_length"] = $RefreshLength
+	}
+	if ($SMTPHost) {
+		$payload["smtp_host"] = $SMTPHost
+		$payload["smtp_port"] = $SMTPPort
+		$payload["smtp_user"] = $SMTPUser
+		$payload["smtp_pass"] = $SMTPPass
+	}
+	if ($OAuthClientID) {
+		$payload["oauth_client_id"] = $OAuthClientID
+		$payload["oauth_client_secret"] = $OAuthSecret
+		$payload["oauth_redirect"] = $OAuthRedirect
+	}
+	if ($Policy) {
+		$payload["password_policy"] = $Policy
 	}
 
 	return (Invoke-Harness "/api/init" $payload)

@@ -164,27 +164,27 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 	defer state.mu.Unlock()
 
 	var req struct {
-		Storage       string `json:"storage"` // "mock", "postgres", "none"
-		DBPort        uint16 `json:"db_port"`
-		DBUser        string `json:"db_user"`
-		DBPass        string `json:"db_pass"`
-		DBName        string `json:"db_name"`
-		DBHost        string `json:"db_host"`
-		Pepper        string `json:"pepper"`
-		JWTSecret     string `json:"jwt_secret"`
-		JWTExpiry     string `json:"jwt_expiry"`
-		OTPPepper     string `json:"otp_pepper"`
-		OTPLength     int    `json:"otp_length"`
-		OTPExpiry     string `json:"otp_expiry"`
-		RefreshExpiry string `json:"refresh_expiry"`
-		RefreshLength int    `json:"refresh_length"`
-		SMTPHost      string `json:"smtp_host"`
-		SMTPPort      string `json:"smtp_port"`
-		SMTPUser      string `json:"smtp_user"`
-		SMTPPass      string `json:"smtp_pass"`
-		OAuthClientID string `json:"oauth_client_id"`
-		OAuthSecret   string `json:"oauth_client_secret"`
-		OAuthRedirect string `json:"oauth_redirect"`
+		Storage       string  `json:"storage"` // "mock", "postgres", "none"
+		DBPort        uint16  `json:"db_port"`
+		DBUser        string  `json:"db_user"`
+		DBPass        string  `json:"db_pass"`
+		DBName        string  `json:"db_name"`
+		DBHost        string  `json:"db_host"`
+		Pepper        *string `json:"pepper"`
+		JWTSecret     *string `json:"jwt_secret"`
+		JWTExpiry     string  `json:"jwt_expiry"`
+		OTPPepper     *string `json:"otp_pepper"`
+		OTPLength     *int    `json:"otp_length"`
+		OTPExpiry     string  `json:"otp_expiry"`
+		RefreshExpiry *string `json:"refresh_expiry"`
+		RefreshLength *int    `json:"refresh_length"`
+		SMTPHost      *string `json:"smtp_host"`
+		SMTPPort      *string `json:"smtp_port"`
+		SMTPUser      *string `json:"smtp_user"`
+		SMTPPass      *string `json:"smtp_pass"`
+		OAuthClientID *string `json:"oauth_client_id"`
+		OAuthSecret   *string `json:"oauth_client_secret"`
+		OAuthRedirect *string `json:"oauth_redirect"`
 		Policy        *struct {
 			MinLength        int  `json:"min_length"`
 			MaxLength        int  `json:"max_length"`
@@ -192,7 +192,6 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 			RequireNumber    bool `json:"require_number"`
 			RequireSpecial   bool `json:"require_special"`
 		} `json:"password_policy"`
-		EnableOTPWithoutPepper bool `json:"enable_otp_without_pepper"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
@@ -222,28 +221,67 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, auth.WithStorage(pg))
 	}
 
-	if req.Pepper != "" {
-		opts = append(opts, auth.WithPepper([]byte(req.Pepper)))
+	if req.Pepper != nil {
+		opts = append(opts, auth.WithPepper([]byte(*req.Pepper)))
 	}
 
-	if req.JWTSecret != "" {
-		opts = append(opts, auth.WithJWT([]byte(req.JWTSecret), parseDuration(req.JWTExpiry)))
+	if req.JWTSecret != nil {
+		opts = append(opts, auth.WithJWT([]byte(*req.JWTSecret), parseDuration(req.JWTExpiry)))
 	}
 
-	if req.OTPPepper != "" || req.OTPLength > 0 || req.OTPExpiry != "" {
-		opts = append(opts, auth.WithOTP(req.OTPLength, []byte(req.OTPPepper), parseDuration(req.OTPExpiry)))
+	if req.OTPPepper != nil || req.OTPLength != nil || req.OTPExpiry != "" {
+		pep := []byte{}
+		if req.OTPPepper != nil {
+			pep = []byte(*req.OTPPepper)
+		}
+		length := 0
+		if req.OTPLength != nil {
+			length = *req.OTPLength
+		}
+		opts = append(opts, auth.WithOTP(length, pep, parseDuration(req.OTPExpiry)))
 	}
 
-	if req.RefreshExpiry != "" || req.RefreshLength > 0 {
-		opts = append(opts, auth.WithRefreshToken(parseDuration(req.RefreshExpiry), req.RefreshLength))
+	if req.RefreshExpiry != nil || req.RefreshLength != nil {
+		dur := time.Duration(0)
+		if req.RefreshExpiry != nil {
+			dur = parseDuration(*req.RefreshExpiry)
+		}
+		length := 0
+		if req.RefreshLength != nil {
+			length = *req.RefreshLength
+		}
+		opts = append(opts, auth.WithRefreshToken(dur, length))
 	}
 
-	if req.SMTPHost != "" {
-		opts = append(opts, auth.WithSMTP(req.SMTPUser, req.SMTPPass, req.SMTPHost, req.SMTPPort))
+	if req.SMTPHost != nil || req.SMTPPort != nil || req.SMTPUser != nil || req.SMTPPass != nil {
+		host, port, user, pass := "", "", "", ""
+		if req.SMTPHost != nil {
+			host = *req.SMTPHost
+		}
+		if req.SMTPPort != nil {
+			port = *req.SMTPPort
+		}
+		if req.SMTPUser != nil {
+			user = *req.SMTPUser
+		}
+		if req.SMTPPass != nil {
+			pass = *req.SMTPPass
+		}
+		opts = append(opts, auth.WithSMTP(user, pass, host, port))
 	}
 
-	if req.OAuthClientID != "" {
-		opts = append(opts, auth.WithOAuth(req.OAuthClientID, req.OAuthSecret, req.OAuthRedirect))
+	if req.OAuthClientID != nil || req.OAuthSecret != nil || req.OAuthRedirect != nil {
+		cid, sec, red := "", "", ""
+		if req.OAuthClientID != nil {
+			cid = *req.OAuthClientID
+		}
+		if req.OAuthSecret != nil {
+			sec = *req.OAuthSecret
+		}
+		if req.OAuthRedirect != nil {
+			red = *req.OAuthRedirect
+		}
+		opts = append(opts, auth.WithOAuth(cid, sec, red))
 	}
 
 	if req.Policy != nil {
